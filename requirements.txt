@@ -5,3 +5,5 @@ imageio==2.9.0
 matplotlib==3.4.3
 networkx==2.5
 numpy==1.22.0
+stable-baselines3
+shimmy

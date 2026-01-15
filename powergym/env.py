@@ -233,8 +233,8 @@ class Env(gym.Env):
         self.shift = info['shift']
         self.show_node_labels = info['show_node_labels']
         self.scale = info['scale'] if 'scale' in info else 1.0
-        self.wrap_observation = True
-        self.observe_load = False
+        self.wrap_observation = info['wrap_observation'] if 'wrap_observation' in info else True
+        self.observe_load = info['observe_load'] if 'observe_load' in info else False
         
         # generate load profile files
         self.load_profile = LoadProfile(\
@@ -277,7 +277,7 @@ class Env(gym.Env):
         self.action_space = self.ActionSpace.space
         self.reset_obs_space()
 
-    def reset_obs_space(self, wrap_observation=True, observe_load=False):
+    def reset_obs_space(self):
         '''
         reset the observation space based on the option of wrapping and load.
         
@@ -285,20 +285,18 @@ class Env(gym.Env):
         it is suggested to set wrap_observation and observe_load through this function
         
         '''
-        self.wrap_observation = wrap_observation
-        self.observe_load = observe_load
         
         self.reset(load_profile_idx=0)
         #nnode = len(self.obs['bus_voltages'])
         nnode = len(np.hstack( list(self.obs['bus_voltages'].values()) ))
-        if observe_load: nload = len(self.obs['load_profile_t'])
+        if self.observe_load: nload = len(self.obs['load_profile_t'])
         
         if self.wrap_observation:
             low, high = [0.8]*nnode, [1.2]*nnode  # add voltage bound
             low, high = low+[0]*self.cap_num, high+[1]*self.cap_num # add cap bound
             low, high = low+[0]*self.reg_num, high+[self.reg_act_num]*self.reg_num # add reg bound
             low, high = low+[0,-1]*self.bat_num, high+[1,1]*self.bat_num # add bat bound
-            if observe_load: low, high = low+[0.0]*nload, high+[1.0]*nload # add load bound
+            if self.observe_load: low, high = low+[0.0]*nload, high+[1.0]*nload # add load bound
             low, high = np.array(low, dtype=np.float32), np.array(high, dtype=np.float32)
             self.observation_space = gym.spaces.Box(low, high) 
         else:
@@ -310,7 +308,7 @@ class Env(gym.Env):
                 'reg_statuses': gym.spaces.MultiDiscrete([self.reg_act_num]*self.cap_num),
                 'bat_statuses': gym.spaces.Dict(bat_dict)
             }
-            if observe_load: obs_dict['load_profile_t'] = gym.spaces.Box(0.0, 1.0, shape=(nload,))
+            if self.observe_load: obs_dict['load_profile_t'] = gym.spaces.Box(0.0, 1.0, shape=(nload,))
             self.observation_space = gym.spaces.Dict(obs_dict)
 
     class MyReward:
@@ -366,9 +364,19 @@ class Env(gym.Env):
             t = self.ctrl_reward(cd, rd, soc, dis)
             summ = p + v + t
             
+            # Calculate constraint cost (positive magnitude of violation) for Safe RL
+            constraint_cost = 0
+            for voltages in self.env.obs['bus_voltages'].values():
+                # voltages is a list of puVmag for each phase
+                max_v = max(voltages)
+                min_v = min(voltages)
+                constraint_cost += max(0, max_v - 1.05)
+                constraint_cost += max(0, 0.95 - min_v)
+
             info = dict() if not record_node else {'violated_nodes': vio_nodes}
             if full: info.update( {'power_loss_ratio':-p/self.power_w, 
-                                   'vol_reward':v, 'ctrl_reward':t} )
+                                   'vol_reward':v, 'ctrl_reward':t,
+                                   'constraint_cost': constraint_cost} )
             
             return summ, info
 

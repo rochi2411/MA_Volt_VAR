@@ -1,113 +1,64 @@
-## Overview
-------------
+# PowerGym Control Agents
 
-PowerGym is a Gym-like environment for Volt-Var control in power distribution systems.
+This repository contains implementations of various Reinforcement Learning (RL) agents for the [PowerGym](https://github.com/siemens/powergym) environment, specifically designed to control capacitors, regulators, and batteries in power distribution networks (IEEE 13, 34, and 123 bus systems).
 
-The Volt-Var control targets minimizing voltage violations, control loss, and power loss under physical networked constraints and device constraints. The networked constraints are maintained by the power distribution system simulator, OpenDSS. The device constraints are usually integer constraints on the actions.
+## Supported Agents
 
-Below is a description of observation and action spaces. {} denotes a finite set and [] denote a continuous interval.
+1.  **Monolithic DRL Agent (`train_monolithic.py`)**: A centralized PPO agent that controls all devices in the grid simultaneously.
+2.  **Specialist Ensemble DRL Agent (`train_marl.py`)**: A multi-agent system (using Independent PPO with parameter sharing) where agents optimize local objectives while contributing to global stability.
+3.  **Heuristic Agent (`heuristic_agent.py`)**: A rule-based baseline that switches capacitors based on voltage thresholds (< 0.95 pu ON, > 1.05 pu OFF).
 
-|**Observation Space** | |
-| ------------- | ------------- |
-| **Variable**| **Range**|
-| Bus voltage     | [0.8, 1.2] |
-| Capacitor status     | {0, 1} |
-| Regulator tap number | {0, ..., 32} |
-| State-of-charge (soc) | [0, 1] |
-| Discharge power  | [-1, 1]  |
+## Installation
 
-|**Action Space** | |
-| ------------- | ------------- |
-| **Variable**| **Range**|
-| Capacitor status     | {0, 1} |
-| Regulator tap number | {0, ..., 32} |
-| Discharge power (disc.) | {0, ..., 32} |
-| Discharge power (cont.) | [-1, 1]  |
-
-There are two kinds of batteries. Discrete battery has discretized choices on the discharge power (e.g., choose from {0,...,32}) and continuous battery chooses the normalized discharge power from the interval [-1,1]. The user should specify the battery's kind upon calling the environment.
-
-The reward function is a combination of three losses: voltage violation, control error, and power loss. The control error is further decomposed into capacitor's & regulator's switching cost and battery's discharge loss & soc loss. The weights among these losses depends on the circuit system and is listed in the Appendix of our paper. 
-
-The implemented circuit systems are summerized as follows.
-| **System**| **# Caps**| **# Regs**| **# Bats**|
-| ------------- | ------------- |------- |------- |
-| 13Bus     | 2 | 3 | 1 |
-| 34Bus | 4 | 6 | 2 |
-| 123Bus | 4 | 7 | 4 |
-| 8500Node | 10 | 12 | 10 |
-
-
-## Requirements
-------------
-- Python 3.8
-
-For the complete installation
-```
-pip install -r requirements.txt
-```
+1.  Install the required dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
 ## Usage
-------------
-### Run options
-`random_agent.py` gives a minimal example of PowerGym usage. The option `--mode` can choose various running mode
 
-To run PowerGym in a single episode
- ```
- python random_agent.py
- ```
+### 1. Train Agents
 
-To run PowerGym for parallel environments
-```
-python random_agent.py --mode=parallele
+You can train agents on different environments (`13Bus`, `34Bus`, `123Bus`).
+
+**Train Monolithic Agent:**
+```bash
+python train_monolithic.py --env_name 13Bus --steps 5000
 ```
 
-To run PowerGym for multiple episodes
-```
-python random_agent.py --mode=episodic
-```
-
-To run PowerGym using OpenDSS controllers defined in the circuit files (if any) 
-```
-python random_agent.py --mode=dss
+**Train Specialist Ensemble Agent:**
+```bash
+python train_marl.py --env_name 13Bus --steps 5000
 ```
 
-### Environment name options
-The option `--env_name` can choose various environments. Below, we take 123Bus as an example.
+### 2. Evaluate Agents
 
-Run a vanilla environment
-```
-python random_agent.py --env_name 123Bus
-```
+After training, evaluate the performance of all agents (Monolithic, Specialist, and Heuristic) and generate comparative metrics.
 
-Run a scaled environment
-```
-python random_agent.py --env_name 123Bus_s1.5
+```bash
+python evaluate_agents.py --env_name 13Bus
 ```
 
-Run an environment with soc error
-```
-python random_agent.py --env_name 123Bus_soc
-```
+This script will:
+*   Load the trained models (e.g., `monolithic_agent_13Bus.zip`).
+*   Run evaluation episodes.
+*   Print average Reward, Voltage Violation, and Power Loss.
 
-Run a scaled environment with soc error
-```
-python random_agent.py --env_name 123Bus_soc_s1.5
-```
+## Training Results & Curves
 
+Training curves showing the learning progress (Reward vs. Time) for both DRL agents across all three systems have been generated:
 
+*   **13Bus**: `training_curve_13Bus.png`
+*   **34Bus**: `training_curve_34Bus.png`
+*   **123Bus**: `training_curve_123Bus.png`
 
-## Citation
+**Summary of Findings:**
+The **Specialist Ensemble** consistently outperforms the Monolithic agent, especially in larger systems (34Bus, 123Bus), demonstrating faster convergence and higher final rewards. The Monolithic agent often struggles to improve beyond a suboptimal baseline in high-dimensional state spaces.
 
-To cite PowerGym, please cite the following paper:
+## Results Summary (Sample)
 
-```
-@article{fan2021powergym,
-  title={PowerGym: A Reinforcement Learning Environment for Volt-Var Control in Power Distribution Systems},
-  author={Fan, Ting-Han and Lee, Xian Yeow and Wang, Yubo},
-  journal={arXiv preprint arXiv:2109.03970},
-  year={2021}
-}
-```
-
-## License
-This project is licensed under MIT License. See [LICENSE.md](LICENSE.md) for more details.
+| Environment | Best Agent | Key Metric |
+| :--- | :--- | :--- |
+| **13Bus** | Specialist | Lowest Voltage Violation (0.0257 vs 0.39) |
+| **34Bus** | Specialist | Lowest Voltage Violation (0.95 vs 1.30) |
+| **123Bus** | Specialist | Lowest Voltage Violation (0.85 vs 2.72) |

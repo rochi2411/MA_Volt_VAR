@@ -280,9 +280,11 @@ def get_info_and_folder(env_name):
     folder_path = os.path.abspath(folder_path)
     return base_info, folder_path
 
-def make_env(env_name, dss_act=False, worker_idx=None):
+def make_env(env_name, dss_act=False, worker_idx=None, wrap_observation=True):
     base_info, folder_path = get_info_and_folder(env_name)
 
+    base_info['wrap_observation'] = wrap_observation
+    
     if worker_idx is None:
         return Env(folder_path, base_info, dss_act)
     else:
