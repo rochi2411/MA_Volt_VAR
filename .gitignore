@@ -6,8 +6,10 @@ env/
 .venv/
 __pycache__/
 *.pyc
-./analysis_plots
-./experiment_results
-./logs
+analysis_plots
+experiment_results
+systems/13Bus/logs
+systems/34Bus/logs
+systems/123Bus/logs
 loadprofile.py
 metric_plot.py
