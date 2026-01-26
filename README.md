@@ -1,64 +1,214 @@
-# PowerGym Control Agents
+# Multi-Agent Deep Reinforcement Learning for Volt-VAR Control
 
-This repository contains implementations of various Reinforcement Learning (RL) agents for the [PowerGym](https://github.com/siemens/powergym) environment, specifically designed to control capacitors, regulators, and batteries in power distribution networks (IEEE 13, 34, and 123 bus systems).
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PowerGym](https://img.shields.io/badge/Environment-PowerGym-green.svg)](https://github.com/siemens/powergym)
 
-## Supported Agents
+A **Specialist Ensemble** approach using Independent PPO (IPPO) with parameter sharing for autonomous Volt-VAR control in power distribution networks. This framework decomposes the complex joint action space into device-specific specialist agents (capacitors, voltage regulators, and battery energy storage systems), enabling scalable and robust voltage regulation.
 
-1.  **Monolithic DRL Agent (`train_monolithic.py`)**: A centralized PPO agent that controls all devices in the grid simultaneously.
-2.  **Specialist Ensemble DRL Agent (`train_marl.py`)**: A multi-agent system (using Independent PPO with parameter sharing) where agents optimize local objectives while contributing to global stability.
-3.  **Heuristic Agent (`heuristic_agent.py`)**: A rule-based baseline that switches capacitors based on voltage thresholds (< 0.95 pu ON, > 1.05 pu OFF).
+## 🎯 Key Features
 
-## Installation
+- **Multi-Agent Decomposition**: Specialist agents for each device type (capacitors, regulators, batteries)
+- **Parameter Sharing**: Efficient learning through shared policy networks with agent-type embeddings
+- **Scalable Architecture**: Linear scaling with number of controllable devices
+- **Robust Performance**: Maintains voltage profiles under observation uncertainty
+- **Comprehensive Baselines**: Includes Monolithic PPO and rule-based Heuristic controllers
 
-1.  Install the required dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+## 📊 Results Summary
 
-## Usage
+| System | Method | Reward (↑) | Violation Index (↓) | p-value |
+|--------|--------|------------|---------------------|---------|
+| **IEEE 13-Bus** | Specialist | **-0.73 ± 0.24** | **0.003 ± 0.005** | — |
+| | Monolithic | -10.95 ± 4.01 | 0.083 ± 0.063 | p=0.007** |
+| | Heuristic | -6.31 ± 0.00 | 0.003 ± 0.000 | p<0.001*** |
+| **IEEE 34-Bus** | Specialist | **-5.39 ± 3.04** | **0.023 ± 0.016** | — |
+| | Monolithic | -21.37 ± 5.14 | 0.285 ± 0.164 | p=0.001** |
+| | Heuristic | -67.55 ± 0.00 | 1.819 ± 0.000 | p<0.001*** |
+| **IEEE 123-Bus** | Specialist | **-0.90 ± 0.18** | **0.004 ± 0.008** | — |
+| | Monolithic | -13.31 ± 1.30 | 0.019 ± 0.033 | p<0.001*** |
+| | Heuristic | -12.57 ± 0.00 | 0.000 ± 0.000 | p<0.001*** |
 
-### 1. Train Agents
+*Results averaged over 5 random seeds with statistical significance testing.*
 
-You can train agents on different environments (`13Bus`, `34Bus`, `123Bus`).
+## 🏗️ Architecture
 
-**Train Monolithic Agent:**
-```bash
-python train_monolithic.py --env_name 13Bus --steps 5000
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Shared Policy Network πθ                  │
+│                  (MLP with agent-type embedding)             │
+└─────────────────────────────────────────────────────────────┘
+        │                    │                    │
+        ▼                    ▼                    ▼
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│  Capacitor    │  │   Regulator   │  │    Battery    │
+│  Specialist   │  │   Specialist  │  │   Specialist  │
+│  (Binary)     │  │  (Discrete)   │  │ (Continuous)  │
+└───────────────┘  └───────────────┘  └───────────────┘
+        │                    │                    │
+        ▼                    ▼                    ▼
+┌─────────────────────────────────────────────────────────────┐
+│              PowerGym Distribution Network                   │
+│            (IEEE 13/34/123 Bus Test Feeders)                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Train Specialist Ensemble Agent:**
-```bash
-python train_marl.py --env_name 13Bus --steps 5000
+## 📁 Repository Structure
+
+```
+MA_Volt_VAR/
+├── powergym/                    # PowerGym environment (submodule)
+├── systems/                     # System-specific configurations
+├── agent_behaviour_analysis.py  # Behavioral analysis & visualization
+├── heuristic_agent.py          # Rule-based baseline controller
+├── run_exp.py                  # Multi-seed experiment runner
+├── train_marl.py               # IPPO training with parameter sharing
+├── train_monolithic.py         # Single-agent PPO baseline
+├── requirements.txt            # Python dependencies
+└── README.md
 ```
 
-### 2. Evaluate Agents
+## 🚀 Quick Start
 
-After training, evaluate the performance of all agents (Monolithic, Specialist, and Heuristic) and generate comparative metrics.
+### Prerequisites
+
+- Python 3.9+
+- OpenDSS (for power flow simulation)
+
+### Installation
 
 ```bash
-python evaluate_agents.py --env_name 13Bus
+# Clone the repository
+git clone https://github.com/rochi2411/MA_Volt_VAR.git
+cd MA_Volt_VAR
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-This script will:
-*   Load the trained models (e.g., `monolithic_agent_13Bus.zip`).
-*   Run evaluation episodes.
-*   Print average Reward, Voltage Violation, and Power Loss.
+### Training
 
-## Training Results & Curves
+```bash
+# Train Specialist Ensemble (IPPO) on IEEE 13-Bus
+python train_marl.py --env_name 13Bus --steps 50000 --seed 42
 
-Training curves showing the learning progress (Reward vs. Time) for both DRL agents across all three systems have been generated:
+# Train Monolithic PPO baseline
+python train_monolithic.py --env_name 13Bus --steps 50000 --seed 42
 
-*   **13Bus**: `training_curve_13Bus.png`
-*   **34Bus**: `training_curve_34Bus.png`
-*   **123Bus**: `training_curve_123Bus.png`
+# Run complete experiments (5 seeds × 3 systems × 3 methods)
+python run_exp.py --env_name all --seeds 42,123,456,789,1011
+```
 
-**Summary of Findings:**
-The **Specialist Ensemble** consistently outperforms the Monolithic agent, especially in larger systems (34Bus, 123Bus), demonstrating faster convergence and higher final rewards. The Monolithic agent often struggles to improve beyond a suboptimal baseline in high-dimensional state spaces.
+### Evaluation & Analysis
 
-## Results Summary (Sample)
+```bash
+# Generate behavioral analysis plots
+python agent_behaviour_analysis.py --env_name 13Bus --robustness
 
-| Environment | Best Agent | Key Metric |
-| :--- | :--- | :--- |
-| **13Bus** | Specialist | Lowest Voltage Violation (0.0257 vs 0.39) |
-| **34Bus** | Specialist | Lowest Voltage Violation (0.95 vs 1.30) |
-| **123Bus** | Specialist | Lowest Voltage Violation (0.85 vs 2.72) |
+# Run on all systems
+python agent_behaviour_analysis.py --env_name all
+```
+
+## 📈 Generated Visualizations
+
+The analysis script generates publication-quality plots:
+
+| Plot | Description |
+|------|-------------|
+| `regulator_comparison_*.png` | Tap position trajectories for all methods |
+| `capacitor_comparison_*.png` | Capacitor switching patterns |
+| `battery_comparison_*.png` | Battery dispatch strategies |
+| `voltage_profile_*.png` | Min/Mean/Max voltage over time |
+| `cumulative_rewards_*.png` | Reward accumulation comparison |
+| `violation_heatmap_*.png` | Temporal violation patterns |
+| `training_curve_*.png` | Learning curves (5 seeds) |
+| `robustness_*.png` | Performance under observation noise |
+
+## 🔧 Configuration
+
+### Environment Parameters
+
+| Parameter | 13-Bus | 34-Bus | 123-Bus |
+|-----------|--------|--------|---------|
+| Capacitors | 2 | 2 | 4 |
+| Regulators | 3 | 6 | 7 |
+| Batteries | 1 | 2 | 4 |
+| Total Agents | 6 | 10 | 15 |
+| Episode Length | 24 steps | 24 steps | 24 steps |
+
+### Training Hyperparameters
+
+```python
+# Default PPO hyperparameters (Stable-Baselines3)
+learning_rate = 3e-4
+n_steps = 2048
+batch_size = 64
+n_epochs = 10
+gamma = 0.99
+gae_lambda = 0.95
+clip_range = 0.2
+```
+
+## 📚 Method Details
+
+### Specialist Ensemble (IPPO with Parameter Sharing)
+
+Our approach uses **Independent PPO (IPPO)** where all specialist agents share a single policy network. To enable the shared network to distinguish between agent types, we augment observations with agent-type identifiers.
+
+**Key advantages:**
+- **Sample Efficiency**: Shared experiences across agents
+- **Scalability**: O(1) policy parameters regardless of agent count
+- **Generalization**: Agent-type embeddings enable transfer learning
+
+### Heuristic Baseline (Algorithm 1)
+
+Rule-based controller implementing standard utility practices:
+
+```
+For each timestep:
+  1. Capacitors: ON if V_min < 0.95, OFF if V_max > 1.05
+  2. Regulators: Tap adjustment with deadband (±0.00625 p.u.)
+  3. Batteries: Discharge if V_min < 0.95, Charge if V_max > 1.05
+```
+
+<!-- ## 📖 Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@article{dutta2025marl_voltvar,
+  title={Multi-Agent Deep Reinforcement Learning for Autonomous Volt-VAR Control in Distribution Networks},
+  author={Dutta, Rochisnu},
+  journal={arXiv preprint},
+  year={2025}
+}
+``` -->
+
+<!-- ## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request -->
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- [PowerGym](https://github.com/siemens/powergym) - Reinforcement learning environment for power systems
+- [Stable-Baselines3](https://github.com/DLR-RM/stable-baselines3) - RL algorithm implementations
+- [OpenDSS](https://www.epri.com/pages/sa/opendss) - Power system simulation engine
+
+## 📧 Contact
+
+**Rochisnu Dutta** - [GitHub](https://github.com/rochi2411)
+
+Project Link: [https://github.com/rochi2411/MA_Volt_VAR](https://github.com/rochi2411/MA_Volt_VAR)
