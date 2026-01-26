@@ -1,84 +1,282 @@
+"""
+train_monolithic.py - Monolithic PPO Training with Multi-Seed Support
+======================================================================
+Single centralized agent controlling all devices.
 
-import gymnasium as gym
-from gymnasium import spaces
+Usage:
+    python train_monolithic.py --env_name 13Bus --steps 50000 --seed 42
+"""
+
 import numpy as np
-import powergym.env_register as env_register
-from stable_baselines3 import PPO
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback
+import argparse
 import os
-import pandas as pd
+import json
+import random
+from datetime import datetime
 
-class PowerGymWrapper(gym.Env):
+# PowerGym
+import sys
+sys.path.append('./powergym')
+from powergym.env_register import make_env
+
+# Gymnasium
+import gymnasium as gym
+
+# Stable-Baselines3
+try:
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.monitor import Monitor
+    from stable_baselines3.common.callbacks import BaseCallback
+    import torch
+except ImportError:
+    print("Error: stable-baselines3 or torch not installed.")
+    exit(1)
+
+
+# ============================================================
+# GYMNASIUM COMPATIBILITY WRAPPER
+# ============================================================
+
+class GymnasiumCompatibilityWrapper(gym.Wrapper):
     """
-    Wrapper to convert PowerGym (old gym) to Gymnasium (for SB3)
-    and normalize observations.
+    Wraps old-style Gym environments to be compatible with Gymnasium API.
+    Handles the seed parameter in reset().
     """
-    def __init__(self, env_name='13Bus'):
-        self.env = env_register.make_env(env_name, wrap_observation=True)
-        
-        # Store original observation space bounds for normalization
-        self.original_obs_low = self.env.observation_space.low
-        self.original_obs_high = self.env.observation_space.high
-        self.original_obs_range = self.original_obs_high - self.original_obs_low
-
-        # Define normalized observation space [-1, 1]
-        self.observation_space = spaces.Box(low=-1.0, high=1.0, 
-                                            shape=self.env.observation_space.shape, 
-                                            dtype=np.float32)
-        
-        # Convert action space (no normalization needed for discrete actions)
-        self.action_space = self._convert_space(self.env.action_space)
-        
-    def _convert_space(self, space):
-        if isinstance(space, (gym.spaces.Box, spaces.Box)):
-            return spaces.Box(low=space.low, high=space.high, dtype=space.dtype)
-        elif "MultiDiscrete" in str(type(space)):
-             return spaces.MultiDiscrete(space.nvec)
-        return space
-
-    def _normalize_observation(self, obs):
-        # Normalize obs to [-1, 1] range
-        # (obs - low) / (high - low) * 2 - 1
-        normalized_obs = (obs - self.original_obs_low) / (self.original_obs_range + 1e-8) * 2 - 1
-        return normalized_obs.astype(np.float32)
-
-    def reset(self, seed=None, options=None):
-        if seed is not None:
-            self.env.seed(seed)
-        obs = self.env.reset()
-        normalized_obs = self._normalize_observation(obs)
-        return normalized_obs, {}
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        normalized_obs = self._normalize_observation(obs)
-        terminated = done
-        truncated = False 
-        return normalized_obs, reward, terminated, truncated, info
     
-    def render(self):
-        return self.env.render()
+    def __init__(self, env):
+        super().__init__(env)
+    
+    def reset(self, *, seed=None, options=None):
+        # Old gym envs don't accept seed in reset()
+        if seed is not None:
+            # Try to set seed via env.seed() if available
+            if hasattr(self.env, 'seed'):
+                self.env.seed(seed)
+            # Also set numpy seed
+            np.random.seed(seed)
+        
+        # Call original reset without seed argument
+        result = self.env.reset()
+        
+        # Handle both old (just obs) and new (obs, info) return formats
+        if isinstance(result, tuple):
+            obs, info = result
+        else:
+            obs = result
+            info = {}
+        
+        return obs, info
+    
+    def step(self, action):
+        # Handle both old and new gym step() return formats
+        result = self.env.step(action)
+        
+        if len(result) == 4:
+            # Old format: obs, reward, done, info
+            obs, reward, done, info = result
+            terminated = done
+            truncated = False
+        else:
+            # New format: obs, reward, terminated, truncated, info
+            obs, reward, terminated, truncated, info = result
+        
+        return obs, reward, terminated, truncated, info
 
-def train_monolithic(env_name='13Bus', steps=3000):
-    log_dir = f"logs/monolithic_{env_name}/"
+
+# ============================================================
+# TRAINING METRICS CALLBACK
+# ============================================================
+
+class TrainingMetricsCallback(BaseCallback):
+    """Callback to log training metrics for publication-quality plots."""
+    
+    def __init__(self, log_freq=100, verbose=0):
+        super().__init__(verbose)
+        self.log_freq = log_freq
+        
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.timesteps_log = []
+        self.rewards_log = []
+        
+        self._current_ep_reward = 0
+        self._current_ep_length = 0
+    
+    def _on_step(self) -> bool:
+        reward = self.locals.get('rewards', [0])[0]
+        self._current_ep_reward += reward
+        self._current_ep_length += 1
+        
+        dones = self.locals.get('dones', [False])
+        if any(dones):
+            self.episode_rewards.append(self._current_ep_reward)
+            self.episode_lengths.append(self._current_ep_length)
+            self._current_ep_reward = 0
+            self._current_ep_length = 0
+        
+        if self.num_timesteps % self.log_freq == 0 and len(self.episode_rewards) > 0:
+            recent = self.episode_rewards[-10:] if len(self.episode_rewards) >= 10 else self.episode_rewards
+            self.timesteps_log.append(self.num_timesteps)
+            self.rewards_log.append(np.mean(recent))
+        
+        return True
+    
+    def get_training_data(self) -> dict:
+        return {
+            "timesteps": self.timesteps_log,
+            "rewards": self.rewards_log,
+            "episode_rewards": self.episode_rewards,
+            "episode_lengths": self.episode_lengths,
+            "total_episodes": len(self.episode_rewards)
+        }
+
+
+# ============================================================
+# TRAINING FUNCTION
+# ============================================================
+
+def train_monolithic(env_name='13Bus', steps=10000, seed=42, model_name=None,
+                    save_training_data=True, verbose=1):
+    """
+    Train Monolithic PPO agent with seed control.
+    
+    Args:
+        env_name: Environment name ('13Bus', '34Bus', '123Bus')
+        steps: Total training timesteps
+        seed: Random seed for reproducibility
+        model_name: Custom model name (auto-generated if None)
+        save_training_data: Whether to save training curves
+        verbose: Verbosity level
+    
+    Returns:
+        model_path: Path to saved model
+        training_data: Dictionary with training metrics
+    """
+    print(f"\n{'='*60}")
+    print(f"Training Monolithic PPO Agent")
+    print(f"Environment: {env_name}")
+    print(f"Timesteps: {steps}")
+    print(f"Seed: {seed}")
+    print(f"{'='*60}\n")
+    
+    # ===== SET ALL RANDOM SEEDS =====
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # if torch.backends.mps.is_available():
+    #     device = "mps"
+    # elif torch.cuda.is_available():
+    #     device = "cuda"
+    # else:
+    #     device = "cpu"
+    device = "cpu"
+    # ===== CREATE ENVIRONMENT =====
+    raw_env = make_env(env_name)
+    env = GymnasiumCompatibilityWrapper(raw_env)  # Wrap for compatibility
+    
+    # Create log directory
+    log_dir = f"logs/monolithic_{env_name}_seed{seed}/"
     os.makedirs(log_dir, exist_ok=True)
     
-    env = PowerGymWrapper(env_name)
+    # Wrap with Monitor
     env = Monitor(env, log_dir + "monitor.csv")
     
-    model = PPO("MlpPolicy", env, verbose=1)
+    # ===== CREATE MODEL WITH SEED =====
+    model = PPO(
+        "MlpPolicy",
+        env,
+        device=device,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.01,
+        vf_coef=0.5,
+        max_grad_norm=0.5,
+        seed=seed,
+        verbose=verbose,
+        policy_kwargs=dict(
+            net_arch=dict(pi=[256, 256], vf=[256, 256])
+        )
+    )
     
-    print(f"Training Monolithic Agent on {env_name} for {steps} steps...")
-    model.learn(total_timesteps=steps)
-    model.save(f"monolithic_agent_{env_name}")
-    print("Training Complete. Model saved.")
+    # ===== CREATE CALLBACK =====
+    callback = TrainingMetricsCallback(log_freq=500, verbose=0)
+    
+    # ===== TRAIN =====
+    start_time = datetime.now()
+    model.learn(total_timesteps=steps, callback=callback)
+    training_time = (datetime.now() - start_time).total_seconds()
+    
+    # ===== SAVE MODEL =====
+    if model_name is None:
+        model_name = f"monolithic_agent_{env_name}_seed{seed}"
+    
+    model_path = f"{model_name}.zip"
+    model.save(model_name)
+    print(f"\nModel saved: {model_path}")
+    
+    # ===== SAVE TRAINING DATA =====
+    training_data = callback.get_training_data()
+    training_data["seed"] = seed
+    training_data["env_name"] = env_name
+    training_data["total_timesteps"] = steps
+    training_data["training_time_seconds"] = training_time
+    
+    if save_training_data:
+        data_path = f"{model_name}_training_data.json"
+        with open(data_path, 'w') as f:
+            serializable = {k: (v.tolist() if isinstance(v, np.ndarray) else v) 
+                          for k, v in training_data.items()}
+            json.dump(serializable, f, indent=2)
+        print(f"Training data saved: {data_path}")
+    
+    # ===== PRINT SUMMARY =====
+    final_reward = np.mean(training_data["episode_rewards"][-10:]) if training_data["episode_rewards"] else 0
+    print(f"\n{'='*60}")
+    print(f"Training Complete!")
+    print(f"Final Avg Reward (last 10 episodes): {final_reward:.2f}")
+    print(f"Total Episodes: {training_data['total_episodes']}")
+    print(f"Training Time: {training_time:.1f} seconds")
+    print(f"{'='*60}\n")
+    
+    env.close()
+    
+    return model_path, training_data
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description='Train Monolithic Agent')
-    parser.add_argument('--env_name', type=str, default='13Bus', help='Environment name (e.g., 13Bus, 34Bus)')
-    parser.add_argument('--steps', type=int, default=3000, help='Number of training steps')
+    parser = argparse.ArgumentParser(description='Train Monolithic PPO Agent')
+    
+    parser.add_argument('--env_name', type=str, default='13Bus',
+                       choices=['13Bus', '34Bus', '123Bus'])
+    parser.add_argument('--steps', type=int, default=50000)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--model_name', type=str, default=None)
+    parser.add_argument('--no_save_data', action='store_true')
+    parser.add_argument('--verbose', type=int, default=1)
+    
     args = parser.parse_args()
     
-    train_monolithic(env_name=args.env_name, steps=args.steps)
+    train_monolithic(
+        env_name=args.env_name,
+        steps=args.steps,
+        seed=args.seed,
+        model_name=args.model_name,
+        save_training_data=not args.no_save_data,
+        verbose=args.verbose
+    )

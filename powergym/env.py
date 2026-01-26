@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import os
-import gym
+import gymnasium as gym
 import numpy as np
 from powergym.circuit import Circuits
 from powergym.loadprofile import LoadProfile
