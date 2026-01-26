@@ -7,3 +7,5 @@ env/
 __pycache__/
 *.pyc
 heuristic_agent.py
+./analysis_plots
+./experiment_results
