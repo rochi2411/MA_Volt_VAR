@@ -5,6 +5,7 @@ Single centralized agent controlling all devices.
 
 Usage:
     python train_monolithic.py --env_name 13Bus --steps 50000 --seed 42
+    
 """
 
 import numpy as np
@@ -21,6 +22,7 @@ from powergym.env_register import make_env
 
 # Gymnasium
 import gymnasium as gym
+from heuristic_agent import GymnasiumCompatibilityWrapper
 
 # Stable-Baselines3
 try:
@@ -31,56 +33,6 @@ try:
 except ImportError:
     print("Error: stable-baselines3 or torch not installed.")
     exit(1)
-
-
-# ============================================================
-# GYMNASIUM COMPATIBILITY WRAPPER
-# ============================================================
-
-class GymnasiumCompatibilityWrapper(gym.Wrapper):
-    """
-    Wraps old-style Gym environments to be compatible with Gymnasium API.
-    Handles the seed parameter in reset().
-    """
-    
-    def __init__(self, env):
-        super().__init__(env)
-    
-    def reset(self, *, seed=None, options=None):
-        # Old gym envs don't accept seed in reset()
-        if seed is not None:
-            # Try to set seed via env.seed() if available
-            if hasattr(self.env, 'seed'):
-                self.env.seed(seed)
-            # Also set numpy seed
-            np.random.seed(seed)
-        
-        # Call original reset without seed argument
-        result = self.env.reset()
-        
-        # Handle both old (just obs) and new (obs, info) return formats
-        if isinstance(result, tuple):
-            obs, info = result
-        else:
-            obs = result
-            info = {}
-        
-        return obs, info
-    
-    def step(self, action):
-        # Handle both old and new gym step() return formats
-        result = self.env.step(action)
-        
-        if len(result) == 4:
-            # Old format: obs, reward, done, info
-            obs, reward, done, info = result
-            terminated = done
-            truncated = False
-        else:
-            # New format: obs, reward, terminated, truncated, info
-            obs, reward, terminated, truncated, info = result
-        
-        return obs, reward, terminated, truncated, info
 
 
 # ============================================================
@@ -263,7 +215,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Monolithic PPO Agent')
     
     parser.add_argument('--env_name', type=str, default='13Bus',
-                       choices=['13Bus', '34Bus', '123Bus'])
+                       choices=['13Bus', '34Bus', '123Bus', '8500Node'])
     parser.add_argument('--steps', type=int, default=50000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--model_name', type=str, default=None)
