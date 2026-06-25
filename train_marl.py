@@ -3,7 +3,7 @@ train_marl.py - Multi-Agent (IPPO) Training with Multi-Seed Support
 =====================================================================
 Modified to support:
 - Reproducible training with seed control
-- Training curve logging for publication
+- Training curve logging
 - Proper model naming
 
 Usage:
@@ -367,7 +367,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train IPPO (Specialist Ensemble) Agent')
     
     parser.add_argument('--env_name', type=str, default='13Bus',
-                       choices=['13Bus', '34Bus', '123Bus'],
+                       choices=['13Bus', '34Bus', '123Bus', '8500Node'],
                        help='Environment name')
     parser.add_argument('--steps', type=int, default=50000,
                        help='Total training timesteps')
