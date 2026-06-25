@@ -3,7 +3,6 @@ heuristic_agent.py - Corrected Rule-Based Heuristic for PowerGym
 ==========================================================================
 Implements Algorithm 1 from the paper with proper PowerGym API compatibility.
 
-This replaces the broken random-action baseline with actual rule-based control.
 """
 
 import numpy as np
@@ -130,6 +129,7 @@ class HeuristicController:
             '13Bus': {'caps': 2, 'regs': 3, 'bats': 1},   # 2 cap banks, 3 reg phases, 1 BESS
             '34Bus': {'caps': 2, 'regs': 6, 'bats': 2},   # 2 caps, 2x3-phase regs, 2 BESS
             '123Bus': {'caps': 4, 'regs': 7, 'bats': 4},  # 4 caps, 7 reg controls, 4 BESS
+            '8500Node': {'caps': 10, 'regs': 12, 'bats': 10}, # PowerGym paper Table 4
         }
         
         config = configs.get(self.env_name, {'caps': 2, 'regs': 3, 'bats': 1})
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Test Heuristic Baseline')
     parser.add_argument('--env', type=str, default='13Bus', 
-                        choices=['13Bus', '34Bus', '123Bus'])
+                        choices=['13Bus', '34Bus', '123Bus', '8500Node'])
     parser.add_argument('--episodes', type=int, default=5)
     parser.add_argument('--seed', type=int, default=42)
     

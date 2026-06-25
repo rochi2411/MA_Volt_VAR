@@ -92,7 +92,7 @@ class LoadProfile:
         
         assert found_load, 'cannot find load at ' + main_daily_dss
 
-        fout.write('Set mode=Daily number=1 hour=0 stepsize=3600 sec=0\n')
+        fout.write(f'Set mode=Daily number=1 hour=0 stepsize={86400//self.steps} sec=0\n')
         fout.close()
         
         return load_file

@@ -44,7 +44,7 @@ _ENV_INFO = {
     '13Bus': {
         'system_name': '13Bus',
         'dss_file': 'IEEE13Nodeckt_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 10.0,
@@ -57,7 +57,7 @@ _ENV_INFO = {
     '13Bus_cbat': {
         'system_name': '13Bus',
         'dss_file': 'IEEE13Nodeckt_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 10.0,
@@ -70,7 +70,7 @@ _ENV_INFO = {
     '13Bus_soc': {
         'system_name': '13Bus',
         'dss_file': 'IEEE13Nodeckt_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 10.0,
@@ -83,7 +83,7 @@ _ENV_INFO = {
     '13Bus_cbat_soc': {
         'system_name': '13Bus',
         'dss_file': 'IEEE13Nodeckt_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 10.0,
@@ -96,7 +96,7 @@ _ENV_INFO = {
     '34Bus': {
         'system_name': '34Bus',
         'dss_file': 'ieee34Mod1_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 1.0,
@@ -109,7 +109,7 @@ _ENV_INFO = {
     '34Bus_cbat': {
         'system_name': '34Bus',
         'dss_file': 'ieee34Mod1_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 1.0,
@@ -122,7 +122,7 @@ _ENV_INFO = {
     '34Bus_soc': {
         'system_name': '34Bus',
         'dss_file': 'ieee34Mod1_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 1.0,
@@ -135,7 +135,7 @@ _ENV_INFO = {
     '34Bus_cbat_soc': {
         'system_name': '34Bus',
         'dss_file': 'ieee34Mod1_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 1.0,
@@ -148,7 +148,7 @@ _ENV_INFO = {
     '123Bus': {
         'system_name': '123Bus',
         'dss_file': 'IEEE123Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 10.0,
@@ -161,7 +161,7 @@ _ENV_INFO = {
     '123Bus_cbat': {
         'system_name': '123Bus',
         'dss_file': 'IEEE123Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 10.0,
@@ -174,7 +174,7 @@ _ENV_INFO = {
     '123Bus_soc': {
         'system_name': '123Bus',
         'dss_file': 'IEEE123Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 10.0,
@@ -187,7 +187,7 @@ _ENV_INFO = {
     '123Bus_cbat_soc': {
         'system_name': '123Bus',
         'dss_file': 'IEEE123Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 10.0,
@@ -200,7 +200,7 @@ _ENV_INFO = {
     '8500Node': {
         'system_name': '8500-Node',
         'dss_file': 'Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 1.0,
@@ -213,7 +213,7 @@ _ENV_INFO = {
     '8500Node_cbat': {
         'system_name': '8500-Node',
         'dss_file': 'Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 1.0,
@@ -227,7 +227,7 @@ _ENV_INFO = {
     '8500Node_soc': {
         'system_name': '8500-Node',
         'dss_file': 'Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': 33,
         'power_w': 1.0,
@@ -240,7 +240,7 @@ _ENV_INFO = {
     '8500Node_cbat_soc': {
         'system_name': '8500-Node',
         'dss_file': 'Master_daily.dss',
-        'max_episode_steps': 24,
+        'max_episode_steps': 144,
         'reg_act_num': 33,
         'bat_act_num': float('inf'),
         'power_w': 1.0,

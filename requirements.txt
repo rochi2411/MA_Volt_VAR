@@ -19,6 +19,9 @@ numpy>=1.24.0
 scipy>=1.13.1
 pandas>=2.0.0
 
+# Optimisation (Model-based OPF baseline: LinDist3Flow MILP solved with HiGHS via CVXPY)
+cvxpy>=1.5.0
+
 # Visualization
 matplotlib>=3.9.0
 pillow>=11.0.0

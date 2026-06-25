@@ -155,4 +155,19 @@ Set Voltagebases=[115, 4.16, .48]
 calcv
 BusCoords IEEE13Node_BusXY.csv
 
+
+! ============================================================
+! DISTRIBUTED SOLAR PV GENERATION (Uncontrollable DER)
+! Added by add_renewable_generation.py
+! PV operates at unity power factor (no reactive support)
+! These are NOT controllable by the RL agent
+! ============================================================
+
+New Loadshape.solar_irradiance npts=144 sinterval=600 mult=(file=loadshape/SolarShape_daily.csv)
+
+New Generator.pv_634 bus1=634.1.2.3 Phases=3 kV=0.48 kW=420.0 pf=1.0 conn=Wye Model=1 daily=solar_irradiance
+New Generator.pv_671 bus1=671.1.2.3 Phases=3 kV=4.16 kW=367.5 pf=1.0 conn=Delta Model=1 daily=solar_irradiance
+New Generator.pv_675 bus1=675.1.2.3 Phases=3 kV=4.16 kW=262.5 pf=1.0 conn=Delta Model=1 daily=solar_irradiance
+! Total PV capacity: 1050.0 kW
+
 Set mode=Daily number=1 hour=0 stepsize=3600 sec=0

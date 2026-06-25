@@ -1,941 +1,771 @@
 """
-analyze_agent_behavior_fixed.py - Fixed Agent Behavior Analysis
+agent_behaviour_analysis.py - Agent Behaviour Analysis (v2)
 ================================================================
-Generates publication-quality plots using REAL data from trained models.
-
-Key Fixes:
-1. Extracts actual actions taken by the agent (not synthetic data)
-2. Records real observations from PowerGym
-3. Compares Specialist vs Monolithic vs Heuristic behavior
-4. Proper robustness analysis with statistical measures
+Compares all 7 methods: Specialist, Monolithic, MAPPO, MADDPG,
+Heuristic, OpenDSS Auto, and Model-Based OPF.
 
 Usage:
-    python analyze_agent_behavior_fixed.py --env_name 13Bus
-    python analyze_agent_behavior_fixed.py --env_name all --robustness
+    python agent_behaviour_analysis.py --env_name 13Bus
+    python agent_behaviour_analysis.py --env_name all
 """
 
-import os
-import sys
-import json
-import numpy as np
-import matplotlib.pyplot as plt
-import argparse
-from datetime import datetime
-from scipy import stats
+import os, sys, json, numpy as np, matplotlib.pyplot as plt, argparse, torch
 
-
-# Custom JSON encoder for numpy types
 class NumpyEncoder(json.JSONEncoder):
-    """JSON encoder that handles numpy types."""
     def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
-            return int(obj)
-        if isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
-            return float(obj)
-        if isinstance(obj, np.bool_):
-            return bool(obj)
-        if hasattr(obj, 'item'):
-            return obj.item()
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, (np.integer,)): return int(obj)
+        if isinstance(obj, (np.floating,)): return float(obj)
+        if isinstance(obj, np.bool_): return bool(obj)
         return super().default(obj)
 
 sys.path.append('./powergym')
-
 from stable_baselines3 import PPO
 from powergym.env_register import make_env
 from train_marl import IPPO_Wrapper
 import gymnasium as gym
 
-# Import heuristic controller (try both possible module names)
 try:
-    from heuristic_agent import HeuristicController
+    from heuristic_agent import HeuristicController, GymnasiumCompatibilityWrapper
 except ImportError:
-    print("WARNING: Could not import HeuristicController. Heuristic analysis will be skipped.")
     HeuristicController = None
 
-# Set style for publication-quality plots
+try:
+    from train_mappo import MAPPO_Wrapper
+except ImportError:
+    MAPPO_Wrapper = None
+
+try:
+    from train_maddpg import MADDPGAgent, MADDPGEnvWrapper, Actor as MADDPGActor
+except ImportError:
+    MADDPGAgent = None
+
+try:
+    from opendss_auto_baseline import OpenDSSAutoController, GreedyVoltageOptimizer     
+except ImportError:
+    OpenDSSAutoController = None
+    GreedyVoltageOptimizer = None
+
 plt.style.use('seaborn-v0_8-whitegrid')
-plt.rcParams['font.family'] = 'serif'
-plt.rcParams['font.size'] = 11
-plt.rcParams['axes.labelsize'] = 12
-plt.rcParams['axes.titlesize'] = 14
-plt.rcParams['legend.fontsize'] = 10
-plt.rcParams['figure.dpi'] = 150
+from paper_style import apply_paper_style
+apply_paper_style()  # consistent sans-serif fonts + 300 DPI / TrueType export
 
+EPISODE_STEPS = 144
+HOURS_PER_STEP = 1.0 / 6
+EPISODE_HOURS = 24.0
 
-class GymnasiumCompatibilityWrapper(gym.Wrapper):
-    """Gymnasium API compatibility wrapper."""
-    def __init__(self, env):
-        super().__init__(env)
-    
-    def reset(self, *, seed=None, options=None):
-        if seed is not None and hasattr(self.env, 'seed'):
-            self.env.seed(seed)
-        result = self.env.reset()
-        if isinstance(result, tuple) and len(result) == 2:
-            return result
-        return result, {}
-    
-    def step(self, action):
-        result = self.env.step(action)
-        if len(result) == 4:
-            obs, reward, done, info = result
-            return obs, reward, done, False, info
-        return result
+ALL_METHODS = ['specialist', 'monolithic', 'mappo', 'maddpg',
+               'heuristic', 'opendss_auto', 'model_opf']
 
-
-# ============================================================
-# DEVICE CONFIGURATION PER SYSTEM
-# ============================================================
+METHOD_NAMES = {
+    'specialist': 'Specialist (Ours)', 'monolithic': 'Monolithic PPO',
+    'mappo': 'MAPPO', 'maddpg': 'MADDPG', 'heuristic': 'Heuristic',
+    'opendss_auto': 'OpenDSS Auto', 'model_opf': 'Model-Based OPF',
+}
+METHOD_COLORS = {
+    'specialist': '#2ecc71', 'monolithic': '#3498db', 'mappo': '#9b59b6',
+    'maddpg': '#f39c12', 'heuristic': '#e74c3c', 'opendss_auto': '#2c3e50',
+    'model_opf': '#8c564b',
+}
+METHOD_LS = {
+    'specialist': '-', 'monolithic': '--', 'mappo': '-.', 'maddpg': ':',
+    'heuristic': '--', 'opendss_auto': '-.', 'model_opf': (0, (3, 1, 1, 1)),
+}
+METHOD_LW = {
+    'specialist': 2.5, 'monolithic': 2.0, 'mappo': 2.0, 'maddpg': 2.0,
+    'heuristic': 1.5, 'opendss_auto': 1.5, 'model_opf': 1.5,
+}
 
 DEVICE_CONFIG = {
     '13Bus': {
-        'n_caps': 2,
-        'n_regs': 3,  # 3 single-phase regulators
-        'n_bats': 1,
+        'n_caps': 2, 'n_regs': 3, 'n_bats': 1,
         'cap_names': ['Cap 675 (3-Ph)', 'Cap 611 (1-Ph)'],
         'reg_names': ['Reg 1 (Ph A)', 'Reg 2 (Ph B)', 'Reg 3 (Ph C)'],
         'bat_names': ['BESS 680'],
     },
     '34Bus': {
-        'n_caps': 2,
-        'n_regs': 6,  # 2 regulators × 3 phases
-        'n_bats': 2,
+        'n_caps': 2, 'n_regs': 6, 'n_bats': 2,
         'cap_names': ['Cap 844', 'Cap 848'],
-        'reg_names': ['Reg1 Ph-A', 'Reg1 Ph-B', 'Reg1 Ph-C', 'Reg2 Ph-A', 'Reg2 Ph-B', 'Reg2 Ph-C'],
+        'reg_names': ['Reg1 Ph-A', 'Reg1 Ph-B', 'Reg1 Ph-C',
+                      'Reg2 Ph-A', 'Reg2 Ph-B', 'Reg2 Ph-C'],
         'bat_names': ['BESS 890', 'BESS 832'],
     },
     '123Bus': {
-        'n_caps': 4,
-        'n_regs': 7,  # Complex configuration
-        'n_bats': 4,
+        'n_caps': 4, 'n_regs': 7, 'n_bats': 4,
         'cap_names': ['C83 (3-Ph)', 'C88 (Ph-A)', 'C90 (Ph-B)', 'C92 (Ph-C)'],
-        'reg_names': ['Reg1 (Gang)', 'Reg2 (Ph-A)', 'Reg3 (Ph-A)', 'Reg3 (Ph-C)', 
+        'reg_names': ['Reg1 (Gang)', 'Reg2 (Ph-A)', 'Reg3 (Ph-A)', 'Reg3 (Ph-C)',
                       'Reg4 (Ph-A)', 'Reg4 (Ph-B)', 'Reg4 (Ph-C)'],
         'bat_names': ['BESS 33', 'BESS 114', 'BESS 67', 'BESS 300'],
-    }
+    },
+    '8500Node': {
+        'n_caps': 10, 'n_regs': 12, 'n_bats': 10,
+        'cap_names': [f'Cap {i+1}' for i in range(10)],
+        'reg_names': [f'Reg {i+1}' for i in range(12)],
+        'bat_names': [f'BESS {i+1}' for i in range(10)],
+    },
 }
 
-
 # ============================================================
-# DATA COLLECTION FROM REAL MODELS
+# HELPERS
 # ============================================================
 
-def collect_agent_actions(env_name: str, model, agent_type: str, 
-                          n_steps: int = 24, seed: int = 42) -> dict:
-    """
-    Collect ACTUAL actions taken by the agent during an episode.
-    
-    Args:
-        env_name: Environment name
-        model: Trained model (PPO) or HeuristicController
-        agent_type: 'specialist', 'monolithic', or 'heuristic'
-        n_steps: Number of environment steps (24 = 4 hours at 10-min intervals)
-        seed: Random seed
-    
-    Returns:
-        Dictionary with timestep-by-timestep data
-    """
-    config = DEVICE_CONFIG[env_name]
-    
-    # Create appropriate environment
-    if agent_type == 'specialist':
-        env = IPPO_Wrapper(env_name)
-    else:
-        raw_env = make_env(env_name)
-        env = GymnasiumCompatibilityWrapper(raw_env)
-    
-    # Initialize data storage
-    data = {
-        'timesteps': [],
-        'hours': [],
-        'rewards': [],
-        'violations': [],
-        'power_loss': [],
-        'observations': [],
-        # Device-specific actions
+def _init_data(config):
+    return {
+        'timesteps': [], 'hours': [], 'rewards': [], 'violations': [],
+        'power_loss': [], 'voltage_min': [], 'voltage_max': [], 'voltage_mean': [],
         'cap_actions': {f'cap_{i}': [] for i in range(config['n_caps'])},
         'reg_actions': {f'reg_{i}': [] for i in range(config['n_regs'])},
         'bat_actions': {f'bat_{i}': [] for i in range(config['n_bats'])},
-        # Voltage data
-        'voltage_min': [],
-        'voltage_max': [],
-        'voltage_mean': [],
     }
-    
-    # Reset environment
-    obs, info = env.reset(seed=seed)
-    
-    # For heuristic, create controller
-    if agent_type == 'heuristic':
-        if HeuristicController is None:
-            print("    ERROR: HeuristicController not available")
-            return data
-        controller = HeuristicController(env_name)
-        controller.reset()
-    
-    # For SPECIALIST: Need to collect actions from sequential agent processing
-    if agent_type == 'specialist':
-        # The IPPO wrapper processes agents sequentially
-        # Each step() call handles one agent, returns intermediate obs until all agents acted
-        
-        # Get agent list and types from environment
-        agent_list = env.agents  # List of agent IDs
-        n_agents = len(agent_list)
-        
-        # Get agent types from underlying multi-agent env
-        agent_types_dict = env.ma_env.agent_types  # {agent_id: 'cap'/'reg'/'bat'}
-        
-        # Count devices of each type to create index mapping
-        cap_count, reg_count, bat_count = 0, 0, 0
-        agent_to_idx = {}  # Map agent_id to device index
-        for agent_id in agent_list:
-            atype = agent_types_dict[agent_id]
-            if atype == 'cap':
-                agent_to_idx[agent_id] = ('cap', cap_count)
-                cap_count += 1
-            elif atype == 'reg':
-                agent_to_idx[agent_id] = ('reg', reg_count)
-                reg_count += 1
-            elif atype == 'bat':
-                agent_to_idx[agent_id] = ('bat', bat_count)
-                bat_count += 1
-        
-        print(f"    IPPO environment has {n_agents} agents: {cap_count} caps, {reg_count} regs, {bat_count} bats")
-        
-        episode_done = False  # Track episode termination separately
-        
-        for step in range(n_steps):
-            if episode_done:
-                break
-                
-            data['timesteps'].append(step)
-            data['hours'].append(step / 6.0)
-            
-            # Collect actions for all agents in this timestep
-            agent_actions = {}  # Store as {agent_id: action}
-            final_reward = 0
-            final_info = {}
-            
-            # Process each agent sequentially
-            for agent_idx in range(n_agents):
-                agent_id = agent_list[agent_idx]
-                
-                # Get action for current agent
-                action, _ = model.predict(obs, deterministic=True)
-                agent_actions[agent_id] = int(action)
-                
-                # Step environment
-                obs, reward, terminated, truncated, info = env.step(action)
-                
-                # Only the last agent's step returns the real reward/info/termination
-                if agent_idx == n_agents - 1:
-                    final_reward = reward
-                    final_info = info
-                    episode_done = terminated or truncated
-            
-            # Parse collected actions by device type using the mapping
-            for agent_id, action in agent_actions.items():
-                device_type, device_idx = agent_to_idx[agent_id]
-                
-                if device_type == 'cap':
-                    key = f'cap_{device_idx}'
-                    if key in data['cap_actions']:
-                        data['cap_actions'][key].append(action % 2)
-                elif device_type == 'reg':
-                    key = f'reg_{device_idx}'
-                    if key in data['reg_actions']:
-                        data['reg_actions'][key].append(action % 33)
-                elif device_type == 'bat':
-                    key = f'bat_{device_idx}'
-                    if key in data['bat_actions']:
-                        # Convert discrete (0-32) to continuous (-1 to 1)
-                        bat_continuous = (action / 16.0) - 1.0
-                        data['bat_actions'][key].append(bat_continuous)
-            
-            # Fill in missing devices with defaults (in case config doesn't match)
-            for i in range(config['n_caps']):
-                if len(data['cap_actions'][f'cap_{i}']) < step + 1:
-                    data['cap_actions'][f'cap_{i}'].append(0)
-            for i in range(config['n_regs']):
-                if len(data['reg_actions'][f'reg_{i}']) < step + 1:
-                    data['reg_actions'][f'reg_{i}'].append(16)
-            for i in range(config['n_bats']):
-                if len(data['bat_actions'][f'bat_{i}']) < step + 1:
-                    data['bat_actions'][f'bat_{i}'].append(0.0)
-            
-            # Record metrics from final step
-            data['rewards'].append(final_reward)
-            
-            # Extract voltage info from last observation
-            voltage_mask = (obs >= 0.7) & (obs <= 1.3)
-            voltages = obs[voltage_mask] if np.any(voltage_mask) else np.array([1.0])
-            data['voltage_min'].append(np.min(voltages))
-            data['voltage_max'].append(np.max(voltages))
-            data['voltage_mean'].append(np.mean(voltages))
-            
-            # Extract metrics from info
-            if isinstance(final_info, dict):
-                if 'constraint_cost' in final_info:
-                    data['violations'].append(final_info['constraint_cost'])
-                elif 'vol_reward' in final_info:
-                    data['violations'].append(abs(final_info['vol_reward']))
-                else:
-                    data['violations'].append(0.0)
-                
-                if 'power_loss_ratio' in final_info:
-                    data['power_loss'].append(final_info['power_loss_ratio'])
-                else:
-                    data['power_loss'].append(0.0)
-            else:
-                data['violations'].append(0.0)
-                data['power_loss'].append(0.0)
-    
+
+def _parse_action(action, config):
+    a = np.atleast_1d(action).flatten()
+    idx = 0
+    caps, regs, bats = [], [], []
+    for _ in range(config['n_caps']):
+        caps.append(int(a[idx]) % 2 if idx < len(a) else 0); idx += 1
+    for _ in range(config['n_regs']):
+        regs.append(int(a[idx]) % 33 if idx < len(a) else 16); idx += 1
+    for _ in range(config['n_bats']):
+        v = float(a[idx]) if idx < len(a) else 0.0
+        if abs(v) > 1: v = (v / 16.0) - 1.0
+        bats.append(v); idx += 1
+    return caps, regs, bats
+
+def _record(data, step, reward, info, obs, caps, regs, bats, config):
+    data['timesteps'].append(step)
+    data['hours'].append(step * HOURS_PER_STEP)
+    data['rewards'].append(reward)
+    vm = (obs >= 0.7) & (obs <= 1.3)
+    vs = obs[vm] if np.any(vm) else np.array([1.0])
+    data['voltage_min'].append(float(np.min(vs)))
+    data['voltage_max'].append(float(np.max(vs)))
+    data['voltage_mean'].append(float(np.mean(vs)))
+    if isinstance(info, dict):
+        data['violations'].append(info.get('constraint_cost', abs(info.get('vol_reward', 0.0))))
+        data['power_loss'].append(info.get('power_loss_ratio', 0.0))
     else:
-        # MONOLITHIC and HEURISTIC: Single action covers all devices
-        for step in range(n_steps):
-            data['timesteps'].append(step)
-            data['hours'].append(step / 6.0)
-            data['observations'].append(obs.copy())
-            
-            # Get action
-            if agent_type == 'heuristic':
-                action = controller.get_action(obs, info)
-            else:
-                action, _ = model.predict(obs, deterministic=True)
-            
-            # Parse action into device-specific components
-            action_flat = np.atleast_1d(action).flatten()
-            
-            idx = 0
-            # Capacitor actions (binary)
-            for i in range(config['n_caps']):
-                if idx < len(action_flat):
-                    cap_act = int(action_flat[idx]) % 2
-                    data['cap_actions'][f'cap_{i}'].append(cap_act)
-                    idx += 1
-                else:
-                    data['cap_actions'][f'cap_{i}'].append(0)
-            
-            # Regulator actions (discrete taps)
-            for i in range(config['n_regs']):
-                if idx < len(action_flat):
-                    reg_act = int(action_flat[idx]) % 33
-                    data['reg_actions'][f'reg_{i}'].append(reg_act)
-                    idx += 1
-                else:
-                    data['reg_actions'][f'reg_{i}'].append(16)
-            
-            # Battery actions
-            for i in range(config['n_bats']):
-                if idx < len(action_flat):
-                    bat_act = float(action_flat[idx])
-                    if abs(bat_act) > 1:
-                        bat_act = (bat_act / 16.0) - 1.0
-                    data['bat_actions'][f'bat_{i}'].append(bat_act)
-                    idx += 1
-                else:
-                    data['bat_actions'][f'bat_{i}'].append(0.0)
-            
-            # Extract voltage info from observation
-            voltage_mask = (obs >= 0.7) & (obs <= 1.3)
-            voltages = obs[voltage_mask] if np.any(voltage_mask) else np.array([1.0])
-            data['voltage_min'].append(np.min(voltages))
-            data['voltage_max'].append(np.max(voltages))
-            data['voltage_mean'].append(np.mean(voltages))
-            
-            # Step environment
-            obs, reward, terminated, truncated, info = env.step(action)
-            
-            data['rewards'].append(reward)
-            
-            # Extract metrics from info
-            if isinstance(info, dict):
-                if 'constraint_cost' in info:
-                    data['violations'].append(info['constraint_cost'])
-                elif 'vol_reward' in info:
-                    data['violations'].append(abs(info['vol_reward']))
-                else:
-                    data['violations'].append(0.0)
-                
-                if 'power_loss_ratio' in info:
-                    data['power_loss'].append(info['power_loss_ratio'])
-                else:
-                    data['power_loss'].append(0.0)
-            else:
-                data['violations'].append(0.0)
-                data['power_loss'].append(0.0)
-            
-            if terminated or truncated:
-                print(f"    Episode terminated at step {step} ({step/6:.1f} hours)")
-                break
-    
+        data['violations'].append(0.0); data['power_loss'].append(0.0)
+    for i in range(config['n_caps']):
+        data['cap_actions'][f'cap_{i}'].append(caps[i] if i < len(caps) else 0)
+    for i in range(config['n_regs']):
+        data['reg_actions'][f'reg_{i}'].append(regs[i] if i < len(regs) else 16)
+    for i in range(config['n_bats']):
+        data['bat_actions'][f'bat_{i}'].append(bats[i] if i < len(bats) else 0.0)
+
+# ============================================================
+# COLLECTORS
+# ============================================================
+
+def _collect_ippo_style(env_name, model, wrapper_cls, config, seed):
+    """Collect from IPPO-style sequential wrapper (Specialist or MAPPO)."""
+    env = wrapper_cls(env_name)
+    data = _init_data(config)
+    obs, _ = env.reset(seed=seed)
+    agents = env.agents
+    n_agents = len(agents)
+    at = env.ma_env.agent_types
+    cc = rc = bc = 0
+    a2i = {}
+    for aid in agents:
+        t = at[aid]
+        if t == 'cap': a2i[aid] = ('cap', cc); cc += 1
+        elif t == 'reg': a2i[aid] = ('reg', rc); rc += 1
+        elif t == 'bat': a2i[aid] = ('bat', bc); bc += 1
+
+    for step in range(EPISODE_STEPS):
+        aa = {}
+        fr, fi, done = 0, {}, False
+        for ai in range(n_agents):
+            action, _ = model.predict(obs, deterministic=True)
+            aa[agents[ai]] = int(action)
+            obs, r, te, tr, info = env.step(action)
+            if ai == n_agents - 1: fr, fi, done = r, info, te or tr
+        cd = [0]*config['n_caps']; rd = [16]*config['n_regs']; bd = [0.0]*config['n_bats']
+        for aid, act in aa.items():
+            dt, di = a2i[aid]
+            if dt == 'cap': cd[di] = act % 2
+            elif dt == 'reg': rd[di] = act % 33
+            elif dt == 'bat': bd[di] = (act / 16.0) - 1.0
+        # Record TRUE bus voltages, not the normalized per-agent obs: the
+        # latter never lands in [0.7,1.3] so _record would fall back to a
+        # constant 1.0 (a flat-line artifact). Mirror the other collectors.
+        raw = env.ma_env.raw_env
+        wrapped = raw.wrap_obs(raw.obs) if hasattr(raw, 'wrap_obs') else obs
+        _record(data, step, fr, fi, wrapped, cd, rd, bd, config)
+        if done: break
     env.close()
-    
-    # Convert to numpy arrays
-    for key in ['timesteps', 'hours', 'rewards', 'violations', 'power_loss',
-                'voltage_min', 'voltage_max', 'voltage_mean']:
-        data[key] = np.array(data[key])
-    
     return data
 
+def collect_specialist(env_name, model, config, seed=42):
+    return _collect_ippo_style(env_name, model, IPPO_Wrapper, config, seed)
 
-def collect_comparative_data(env_name: str, specialist_path: str, 
-                             monolithic_path: str, seed: int = 42) -> dict:
+def collect_mappo(env_name, model, config, seed=42):
+    if MAPPO_Wrapper is None: return None
+    return _collect_ippo_style(env_name, model, MAPPO_Wrapper, config, seed)
+
+def collect_joint(env_name, model, agent_type, config, seed=42):
+    """Monolithic or Heuristic."""
+    raw = make_env(env_name)
+    env = GymnasiumCompatibilityWrapper(raw)
+    data = _init_data(config)
+    obs, info = env.reset(seed=seed)
+    ctrl = None
+    if agent_type == 'heuristic' and HeuristicController:
+        ctrl = HeuristicController(env_name); ctrl.reset()
+    for step in range(EPISODE_STEPS):
+        if agent_type == 'heuristic': action = ctrl.get_action(obs, info)
+        else: action, _ = model.predict(obs, deterministic=True)
+        caps, regs, bats = _parse_action(action, config)
+        obs, reward, te, tr, info = env.step(action)
+        _record(data, step, reward, info, obs, caps, regs, bats, config)
+        if te or tr: break
+    env.close()
+    return data
+
+def collect_maddpg(env_name, pt_path, config, seed=42):
+    if MADDPGAgent is None: return None
+    # Load the checkpoint first: building the env chdir's into the system
+    # folder, which would break a relative pt_path.
+    ckpt = torch.load(os.path.abspath(pt_path), map_location='cpu')
+    # MADDPGEnvWrapper takes the env *name* and builds its own MultiAgentPowerGrid.
+    env = MADDPGEnvWrapper(env_name)
+    ma = env.ma_env
+    data = _init_data(config)
+    # Checkpoints store one actor state_dict per agent as {"actor_i": ...},
+    # rebuilt exactly as train_maddpg.evaluate_maddpg does.
+    actors = []
+    for i, aid in enumerate(env.agents):
+        actor = MADDPGActor(env.obs_dim, env.act_dims[aid])
+        actor.load_state_dict(ckpt[f"actor_{i}"]); actor.eval()
+        actors.append(actor)
+    # Map each agent to its device-type slot, matching the other collectors.
+    at = ma.agent_types
+    a2i = {}; cc = rc = bc = 0
+    for aid in env.agents:
+        t = at[aid]
+        if t == 'cap': a2i[aid] = ('cap', cc); cc += 1
+        elif t == 'reg': a2i[aid] = ('reg', rc); rc += 1
+        elif t == 'bat': a2i[aid] = ('bat', bc); bc += 1
+    # Reset on the same load profile as every other method for a fair comparison.
+    go = ma.raw_env.reset(load_profile_idx=seed % ma.raw_env.num_profiles)
+    env.current_obs_dict = ma._extract_local_obs(go)
+    obs_list = [env._get_local_obs(aid) for aid in env.agents]
+    for step in range(EPISODE_STEPS):
+        actions = []
+        for i, actor in enumerate(actors):
+            obs_t = torch.FloatTensor(obs_list[i]).unsqueeze(0)
+            with torch.no_grad():
+                act_oh = actor.get_action(obs_t, explore=False)
+            actions.append(int(act_oh.argmax(-1).item()))
+        obs_list, _global, reward, done, info = env.step(actions)
+        caps = [0]*config['n_caps']; regs = [16]*config['n_regs']; bats = [0.0]*config['n_bats']
+        for i, aid in enumerate(env.agents):
+            dt, di = a2i[aid]; act = actions[i]
+            if dt == 'cap': caps[di] = act % 2
+            elif dt == 'reg': regs[di] = act % 33
+            elif dt == 'bat': bats[di] = (act / 16.0) - 1.0
+        # Record TRUE bus voltages. env._get_global_obs() returns NORMALIZED
+        # voltages ((V-1)*10, centered at 0), which never land in _record's
+        # [0.7,1.3] window and would collapse to a flat-1.0 artifact.
+        wrapped = ma.raw_env.wrap_obs(ma.raw_env.obs) if hasattr(ma.raw_env, 'wrap_obs') else env._get_global_obs()
+        _record(data, step, reward, info, wrapped, caps, regs, bats, config)
+        if done: break
+    return data
+
+def collect_opendss_auto(env_name, config, seed=42):
+    if OpenDSSAutoController is None: return None
+    raw = make_env(env_name, dss_act=True)
+    ctrl = OpenDSSAutoController(raw)
+    data = _init_data(config)
+    raw.reset(load_profile_idx=seed % raw.num_profiles)
+    for step in range(EPISODE_STEPS):
+        ba = ctrl.get_battery_actions()
+        if raw.bat_num > 0:
+            for i, bn in enumerate(raw.bat_names):
+                raw.circuit.batteries[bn].step_before_solve(ba[i])
+        obs, reward, done, info = raw.dss_step()
+        if raw.bat_num > 0:
+            for bn in raw.bat_names: raw.circuit.batteries[bn].step_after_solve()
+        caps = [int(raw.circuit.capacitors[c].status) for c in raw.cap_names] if hasattr(raw, 'cap_names') else []
+        regs = []
+        if hasattr(raw, 'reg_names'):
+            for r in raw.reg_names:
+                reg = raw.circuit.regulators[r]
+                mintap, maxtap, numtaps = reg.tap_feature
+                step = (maxtap - mintap) / numtaps if numtaps > 0 else 1
+                tap_idx = int(round((reg.tap - mintap) / step))
+                regs.append(max(0, min(32, tap_idx)))
+        else:
+            regs = [16] * config['n_regs']
+        bats_n = [(b / 16.0) - 1.0 if isinstance(b, (int, np.integer)) else float(b) for b in ba]
+        wrapped = raw.wrap_obs(raw.obs) if hasattr(raw, 'wrap_obs') else np.array([1.0])
+        _record(data, step, reward, info, wrapped, caps, regs, bats_n, config)
+        if done: break
+    return data
+
+def collect_model_opf(env_name, config, seed=42):
+    """Roll out the LinDist3Flow MILP oracle (the actual 'Model-based OPF'
+    baseline) and record its trajectory. Solves the perfect-information
+    144-period program, then replays the resulting device schedule in the env.
     """
-    Collect data from all three methods for comparison.
-    """
-    print(f"\nCollecting data for {env_name}...")
-    
-    results = {}
-    
-    def model_exists(path):
-        """Check if model exists (with or without .zip)"""
-        return os.path.exists(path + '.zip') or os.path.exists(path)
-    
-    # Specialist
-    print("  Loading Specialist model...")
-    if model_exists(specialist_path):
-        try:
-            model = PPO.load(specialist_path)
-            results['specialist'] = collect_agent_actions(env_name, model, 'specialist', seed=seed)
-            print(f"    Collected {len(results['specialist']['timesteps'])} steps")
-        except Exception as e:
-            print(f"    ERROR loading specialist: {e}")
-    else:
-        print(f"    WARNING: Specialist model not found at {specialist_path}")
-    
-    # Monolithic
-    print("  Loading Monolithic model...")
-    if model_exists(monolithic_path):
-        try:
-            model = PPO.load(monolithic_path)
-            results['monolithic'] = collect_agent_actions(env_name, model, 'monolithic', seed=seed)
-            print(f"    Collected {len(results['monolithic']['timesteps'])} steps")
-        except Exception as e:
-            print(f"    ERROR loading monolithic: {e}")
-    else:
-        print(f"    WARNING: Monolithic model not found at {monolithic_path}")
-    
-    # Heuristic (always runs)
-    print("  Running Heuristic controller...")
     try:
-        results['heuristic'] = collect_agent_actions(env_name, None, 'heuristic', seed=seed)
-        print(f"    Collected {len(results['heuristic']['timesteps'])} steps")
-    except Exception as e:
-        print(f"    ERROR running heuristic: {e}")
-    
-    return results
-
+        from opf_lindist3flow import (NetworkModel, OPFBuilder, load_horizon_profiles,
+                                      slack_voltage_sq, get_weights, _project_battery_state)
+    except ImportError:
+        return None
+    raw = make_env(env_name, dss_act=False)
+    nm = NetworkModel(raw)
+    idx = seed % raw.num_profiles
+    p_dem, q_dem = load_horizon_profiles(nm, raw, idx, EPISODE_STEPS)
+    raw.reset(load_profile_idx=idx)
+    builder = OPFBuilder(nm, p_dem, q_dem, EPISODE_STEPS, get_weights(env_name),
+                         slack_voltage_sq(nm), tap_tier=1)
+    builder.solve(time_limit=300, mip_gap=0.01)
+    traj = builder.extract_trajectory()
+    cap_n, reg_n, bat_n = len(nm.caps), len(nm.regs), len(nm.bats)
+    data = _init_data(config)
+    raw.reset(load_profile_idx=idx)
+    for step in range(EPISODE_STEPS):
+        action = [int(traj['caps'][k, step]) for k in range(cap_n)]
+        action += [int(traj['regs'][k, step]) for k in range(reg_n)]
+        for k in range(bat_n):
+            action.append(_project_battery_state(nm.bats[k], traj['bats'][k, step]))
+        has_float = any(isinstance(a, float) for a in action)
+        obs, reward, done, info = raw.step(
+            np.array(action, dtype=float) if has_float else np.array(action, dtype=int))
+        # Record devices directly from the (normalized) OPF schedule.
+        caps = [int(traj['caps'][k, step]) for k in range(cap_n)]
+        regs = [int(traj['regs'][k, step]) for k in range(reg_n)]
+        bats = [float(np.clip(traj['bats'][k, step] / max(nm.bats[k]['max_kw'], 1e-9),
+                              -1.0, 1.0)) for k in range(bat_n)]
+        wrapped = raw.wrap_obs(raw.obs) if hasattr(raw, 'wrap_obs') else obs
+        _record(data, step, reward, info, wrapped, caps, regs, bats, config)
+        if done: break
+    return data
 
 # ============================================================
-# PLOTTING FUNCTIONS
+# ORCHESTRATOR
 # ============================================================
 
-def plot_regulator_comparison(data_dict: dict, env_name: str, save_path: str):
-    """
-    Compare regulator tap positions across all methods.
-    """
+def collect_all(env_name, results_dir, seed=42):
     config = DEVICE_CONFIG[env_name]
-    n_regs = min(3, config['n_regs'])  # Show up to 3 regulators
-    
-    fig, axes = plt.subplots(n_regs, 1, figsize=(12, 3*n_regs), sharex=True)
-    if n_regs == 1:
-        axes = [axes]
-    
-    colors = {'specialist': '#2ecc71', 'monolithic': '#3498db', 'heuristic': '#e74c3c'}
-    
+    data = {}
+
+    # Resolve to absolute path
+    results_dir = os.path.abspath(results_dir)
+    print(f"  Results dir: {results_dir}")
+
+    def me(p):
+        """Check if model exists, print status."""
+        exists = os.path.exists(p + '.zip') or os.path.exists(p)
+        status = "FOUND" if exists else "NOT FOUND"
+        print(f"    {os.path.basename(p)}: {status}")
+        return exists
+
+    # 1. Specialist
+    sp = f"{results_dir}/specialist_{env_name}_seed{seed}"
+    if me(sp):
+        try:
+            data['specialist'] = collect_specialist(env_name, PPO.load(sp), config, seed)
+            print(f"      -> {len(data['specialist']['timesteps'])} steps collected")
+        except Exception as e:
+            print(f"      -> ERROR: {e}")
+
+    # 2. Monolithic
+    mo = f"{results_dir}/monolithic_{env_name}_seed{seed}"
+    if me(mo):
+        try:
+            data['monolithic'] = collect_joint(env_name, PPO.load(mo), 'monolithic', config, seed)
+            print(f"      -> {len(data['monolithic']['timesteps'])} steps collected")
+        except Exception as e:
+            print(f"      -> ERROR: {e}")
+
+    # 3. MAPPO
+    ma = f"{results_dir}/mappo_{env_name}_seed{seed}"
+    if me(ma):
+        if MAPPO_Wrapper:
+            try:
+                data['mappo'] = collect_mappo(env_name, PPO.load(ma), config, seed)
+                print(f"      -> {len(data['mappo']['timesteps'])} steps collected")
+            except Exception as e:
+                print(f"      -> ERROR: {e}")
+        else:
+            print(f"      -> SKIPPED (MAPPO_Wrapper not imported)")
+
+    # 4. MADDPG
+    md = f"{results_dir}/maddpg_{env_name}_seed{seed}.pt"
+    md_exists = os.path.exists(md)
+    print(f"    maddpg_{env_name}_seed{seed}.pt: {'FOUND' if md_exists else 'NOT FOUND'}")
+    if md_exists:
+        if MADDPGAgent:
+            try:
+                data['maddpg'] = collect_maddpg(env_name, md, config, seed)
+                print(f"      -> {len(data['maddpg']['timesteps'])} steps collected")
+            except Exception as e:
+                print(f"      -> ERROR: {e}")
+        else:
+            print(f"      -> SKIPPED (MADDPGAgent not imported)")
+
+    # 5. Heuristic
+    if HeuristicController:
+        print(f"    Heuristic: RUNNING")
+        try:
+            data['heuristic'] = collect_joint(env_name, None, 'heuristic', config, seed)
+            print(f"      -> {len(data['heuristic']['timesteps'])} steps collected")
+        except Exception as e:
+            print(f"      -> ERROR: {e}")
+    else:
+        print(f"    Heuristic: SKIPPED (not imported)")
+
+    # 6. OpenDSS Auto
+    if OpenDSSAutoController:
+        print(f"    OpenDSS Auto: RUNNING")
+        try:
+            r = collect_opendss_auto(env_name, config, seed)
+            if r:
+                data['opendss_auto'] = r
+                print(f"      -> {len(data['opendss_auto']['timesteps'])} steps collected")
+        except Exception as e:
+            print(f"      -> ERROR: {e}")
+    else:
+        print(f"    OpenDSS Auto: SKIPPED (not imported)")
+
+    # 7. Model-Based OPF
+    if GreedyVoltageOptimizer:
+        print(f"    Model-Based OPF: RUNNING")
+        try:
+            r = collect_model_opf(env_name, config, seed)
+            if r:
+                data['model_opf'] = r
+                print(f"      -> {len(data['model_opf']['timesteps'])} steps collected")
+        except Exception as e:
+            print(f"      -> ERROR: {e}")
+    else:
+        print(f"    Model-Based OPF: SKIPPED (not imported)")
+
+    # Summary
+    print(f"\n  Methods collected: {list(data.keys())}")
+    missing = [m for m in ALL_METHODS if m not in data]
+    if missing:
+        print(f"  Missing: {missing}")
+
+    for m in data:
+        if data[m] is None: continue
+        for k in ['timesteps','hours','rewards','violations','power_loss','voltage_min','voltage_max','voltage_mean']:
+            data[m][k] = np.array(data[m][k])
+    return data
+
+# ============================================================
+# PLOTS
+# ============================================================
+
+def _sty(m):
+    return METHOD_COLORS.get(m,'#333'), METHOD_LS.get(m,'-'), METHOD_LW.get(m,1.5), METHOD_NAMES.get(m,m)
+
+def _legend_outside(ax, ncol=1):
+    """Place the legend just outside the axes (upper-right) so it never
+    overlaps the data. _save_fig uses bbox_inches='tight', which expands the
+    saved canvas to include the legend."""
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    ax.legend(handles, labels, loc='upper left', bbox_to_anchor=(1.01, 1.0),
+              ncol=ncol, frameon=True, framealpha=0.9, borderaxespad=0.0)
+
+def _save_fig(path):
+    """Ensure directory exists, then save and close."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {path}")
+
+def plot_regulators(dd, env, path):
+    cfg = DEVICE_CONFIG[env]; nr = min(3, cfg['n_regs'])
+    fig, axes = plt.subplots(nr, 1, figsize=(14, 3*nr), sharex=True)
+    if nr == 1: axes = [axes]
     for i, ax in enumerate(axes):
-        reg_key = f'reg_{i}'
-        reg_name = config['reg_names'][i] if i < len(config['reg_names']) else f'Reg {i+1}'
-        
-        for method, data in data_dict.items():
-            if reg_key in data['reg_actions']:
-                hours = data['hours']
-                taps = data['reg_actions'][reg_key]
-                ax.plot(hours, taps, color=colors[method], 
-                       label=method.capitalize(), linewidth=1.5, alpha=0.8)
-        
-        ax.set_ylabel(f'{reg_name}\nTap Position')
-        ax.set_ylim(0, 32)
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-    
+        rk = f'reg_{i}'; rn = cfg['reg_names'][i] if i < len(cfg['reg_names']) else f'Reg {i+1}'
+        for m, d in dd.items():
+            if d is None or rk not in d['reg_actions']: continue
+            c, ls, lw, lb = _sty(m)
+            ax.step(d['hours'], d['reg_actions'][rk], color=c, linestyle=ls, linewidth=lw, label=lb, alpha=0.85, where='post')
+        ax.set_ylabel(f'{rn}\nTap'); ax.set_ylim(0, 32); ax.grid(True, alpha=0.3)
     axes[-1].set_xlabel('Time (Hours)')
-    # Use actual episode duration
-    for ax in axes:
-        ax.set_xlim(0, 4)
-    fig.suptitle(f'IEEE {env_name}: Regulator Control Comparison', fontsize=14, y=1.02)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
+    for ax in axes: ax.set_xlim(0, EPISODE_HOURS)
+    _legend_outside(axes[0])
+    fig.suptitle(f'IEEE {env}: Regulator Control (24h)', y=1.02)
+    plt.tight_layout(); _save_fig(path)
 
-
-def plot_capacitor_comparison(data_dict: dict, env_name: str, save_path: str):
-    """
-    Compare capacitor switching patterns across methods.
-    """
-    config = DEVICE_CONFIG[env_name]
-    n_caps = config['n_caps']
-    
-    fig, axes = plt.subplots(n_caps, 1, figsize=(12, 2.5*n_caps), sharex=True)
-    if n_caps == 1:
-        axes = [axes]
-    
-    colors = {'specialist': '#2ecc71', 'monolithic': '#3498db', 'heuristic': '#e74c3c'}
-    offsets = {'specialist': 0.0, 'monolithic': 0.15, 'heuristic': 0.30}
-    
+def plot_capacitors(dd, env, path):
+    cfg = DEVICE_CONFIG[env]; nc = cfg['n_caps']
+    fig, axes = plt.subplots(nc, 1, figsize=(14, 2.5*nc), sharex=True)
+    if nc == 1: axes = [axes]
     for i, ax in enumerate(axes):
-        cap_key = f'cap_{i}'
-        cap_name = config['cap_names'][i] if i < len(config['cap_names']) else f'Cap {i+1}'
-        
-        for method, data in data_dict.items():
-            if cap_key in data['cap_actions']:
-                hours = data['hours']
-                states = np.array(data['cap_actions'][cap_key]) + offsets[method]
-                ax.step(hours, states, color=colors[method], 
-                       label=method.capitalize(), linewidth=2, where='post', alpha=0.8)
-        
-        ax.set_ylabel(f'{cap_name}\nStatus')
-        ax.set_ylim(-0.1, 1.5)
-        ax.set_yticks([0, 1])
-        ax.set_yticklabels(['OFF', 'ON'])
-        ax.legend(loc='upper right')
+        ck = f'cap_{i}'; cn = cfg['cap_names'][i] if i < len(cfg['cap_names']) else f'Cap {i+1}'
+        for m, d in dd.items():
+            if d is None or ck not in d['cap_actions']: continue
+            c, ls, lw, lb = _sty(m)
+            ax.step(d['hours'], d['cap_actions'][ck], color=c, linestyle=ls, linewidth=lw, label=lb, alpha=0.85, where='post')
+        ax.set_ylabel(f'{cn}'); ax.set_ylim(-0.1, 1.1); ax.set_yticks([0,1]); ax.set_yticklabels(['OFF','ON'])
         ax.grid(True, alpha=0.3)
-    
     axes[-1].set_xlabel('Time (Hours)')
-    # Use actual episode duration
-    for ax in axes:
-        ax.set_xlim(0, 4)
-    fig.suptitle(f'IEEE {env_name}: Capacitor Switching Comparison', fontsize=14, y=1.02)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
+    for ax in axes: ax.set_xlim(0, EPISODE_HOURS)
+    _legend_outside(axes[0])
+    fig.suptitle(f'IEEE {env}: Capacitor Switching (24h)', y=1.02)
+    plt.tight_layout(); _save_fig(path)
 
-
-def plot_battery_comparison(data_dict: dict, env_name: str, save_path: str):
-    """
-    Compare battery dispatch strategies across methods.
-    """
-    config = DEVICE_CONFIG[env_name]
-    n_bats = config['n_bats']
-    
-    fig, axes = plt.subplots(n_bats, 1, figsize=(12, 3*n_bats), sharex=True)
-    if n_bats == 1:
-        axes = [axes]
-    
-    colors = {'specialist': '#2ecc71', 'monolithic': '#3498db', 'heuristic': '#e74c3c'}
-    
+def plot_batteries(dd, env, path):
+    cfg = DEVICE_CONFIG[env]; nb = cfg['n_bats']
+    fig, axes = plt.subplots(nb, 1, figsize=(14, 3*nb), sharex=True)
+    if nb == 1: axes = [axes]
     for i, ax in enumerate(axes):
-        bat_key = f'bat_{i}'
-        bat_name = config['bat_names'][i] if i < len(config['bat_names']) else f'BESS {i+1}'
-        
-        for method, data in data_dict.items():
-            if bat_key in data['bat_actions']:
-                hours = data['hours']
-                power = np.array(data['bat_actions'][bat_key])
-                ax.plot(hours, power, color=colors[method], 
-                       label=method.capitalize(), linewidth=1.5, alpha=0.8)
-        
-        ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-        ax.fill_between([0, 24], 0, 1, alpha=0.1, color='green', label='Discharge Zone')
-        ax.fill_between([0, 24], -1, 0, alpha=0.1, color='red', label='Charge Zone')
-        
-        ax.set_ylabel(f'{bat_name}\nPower (p.u.)')
-        ax.set_ylim(-1.2, 1.2)
-        ax.legend(loc='upper right')
+        bk = f'bat_{i}'; bn = cfg['bat_names'][i] if i < len(cfg['bat_names']) else f'BESS {i+1}'
+        for m, d in dd.items():
+            if d is None or bk not in d['bat_actions']: continue
+            c, ls, lw, lb = _sty(m)
+            ax.plot(d['hours'], d['bat_actions'][bk], color=c, linestyle=ls, linewidth=lw, label=lb, alpha=0.8)
+        ax.axhline(0, color='black', lw=0.5); ax.set_ylabel(f'{bn}\nPower'); ax.set_ylim(-1.2, 1.2)
         ax.grid(True, alpha=0.3)
-    
     axes[-1].set_xlabel('Time (Hours)')
-    # Use actual episode duration
-    for ax in axes:
-        ax.set_xlim(0, 4)
-    fig.suptitle(f'IEEE {env_name}: Battery Dispatch Comparison', fontsize=14, y=1.02)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
+    for ax in axes: ax.set_xlim(0, EPISODE_HOURS)
+    _legend_outside(axes[0])
+    fig.suptitle(f'IEEE {env}: Battery Dispatch (24h)', y=1.02)
+    plt.tight_layout(); _save_fig(path)
 
+def plot_voltage(dd, env, path):
+    fig, ax = plt.subplots(figsize=(14, 5))
+    for m, d in dd.items():
+        if d is None: continue
+        c, ls, lw, lb = _sty(m)
+        ax.plot(d['hours'], d['voltage_mean'], color=c, linestyle=ls, linewidth=lw, label=lb, alpha=0.85)
+    ax.axhline(1.05, color='red', ls='--', lw=1, alpha=0.6, label='_nolegend_')
+    ax.axhline(0.95, color='red', ls='--', lw=1, alpha=0.6, label='_nolegend_')
+    ax.fill_between([0, EPISODE_HOURS], 0.95, 1.05, alpha=0.08, color='green')
+    ax.set_xlabel('Time (Hours)'); ax.set_ylabel('Mean Voltage (p.u.)')
+    ax.set_ylim(0.90, 1.10); ax.set_xlim(0, EPISODE_HOURS)
+    _legend_outside(ax); ax.grid(True, alpha=0.3)
+    ax.set_title(f'IEEE {env}: 24h Voltage Profile')
+    plt.tight_layout(); _save_fig(path)
 
-def plot_voltage_profile_comparison(data_dict: dict, env_name: str, save_path: str):
-    """
-    Compare voltage profiles across methods over time.
-    """
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-    
-    colors = {'specialist': '#2ecc71', 'monolithic': '#3498db', 'heuristic': '#e74c3c'}
-    labels = ['Min Voltage', 'Mean Voltage', 'Max Voltage']
-    keys = ['voltage_min', 'voltage_mean', 'voltage_max']
-    
-    for ax, key, label in zip(axes, keys, labels):
-        for method, data in data_dict.items():
-            hours = data['hours']
-            voltages = data[key]
-            ax.plot(hours, voltages, color=colors[method], 
-                   label=method.capitalize(), linewidth=1.5, alpha=0.8)
-        
-        ax.axhline(y=1.05, color='red', linestyle='--', linewidth=1, alpha=0.7)
-        ax.axhline(y=0.95, color='red', linestyle='--', linewidth=1, alpha=0.7)
-        ax.fill_between([0, 4], 0.95, 1.05, alpha=0.1, color='green')
-        
-        ax.set_ylabel(f'{label} (p.u.)')
-        ax.set_ylim(0.90, 1.10)
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-    
-    axes[-1].set_xlabel('Time (Hours)')
-    # Use actual episode duration
-    for ax in axes:
-        ax.set_xlim(0, 4)
-    fig.suptitle(f'IEEE {env_name}: Voltage Profile Comparison', fontsize=14, y=1.02)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
+def plot_cumulative(dd, env, path):
+    fig, ax = plt.subplots(figsize=(12, 6))
+    for m, d in dd.items():
+        if d is None: continue
+        c, ls, lw, lb = _sty(m)
+        cr = np.cumsum(d['rewards'])
+        ax.plot(d['hours'], cr, color=c, linestyle=ls, linewidth=lw, label=f"{lb} ({cr[-1]:.1f})", alpha=0.85)
+    ax.set_xlabel('Time (Hours)'); ax.set_ylabel('Cumulative Reward')
+    ax.set_title(f'IEEE {env}: Cumulative Reward (24h)'); ax.set_xlim(0, EPISODE_HOURS)
+    _legend_outside(ax); ax.grid(True, alpha=0.3)
+    plt.tight_layout(); _save_fig(path)
 
-
-def plot_cumulative_rewards(data_dict: dict, env_name: str, save_path: str):
-    """
-    Plot cumulative rewards over time for all methods.
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    colors = {'specialist': '#2ecc71', 'monolithic': '#3498db', 'heuristic': '#e74c3c'}
-    
-    for method, data in data_dict.items():
-        hours = data['hours']
-        cumulative_reward = np.cumsum(data['rewards'])
-        ax.plot(hours, cumulative_reward, color=colors[method], 
-               label=f"{method.capitalize()} (Final: {cumulative_reward[-1]:.1f})",
-               linewidth=2)
-    
-    ax.set_xlabel('Time (Hours)')
-    ax.set_ylabel('Cumulative Reward')
-    ax.set_title(f'IEEE {env_name}: Cumulative Reward Comparison')
-    ax.legend(loc='lower left')
-    ax.grid(True, alpha=0.3)
-    # Use actual episode duration
-    ax.set_xlim(0, 4)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
-
-
-def plot_violation_heatmap(data_dict: dict, env_name: str, save_path: str):
-    """
-    Create heatmap of voltage violations over time.
-    """
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    
-    methods = ['specialist', 'monolithic', 'heuristic']
-    titles = ['Specialist Ensemble', 'Monolithic PPO', 'Heuristic']
-    
-    for ax, method, title in zip(axes, methods, titles):
-        if method in data_dict:
-            violations = data_dict[method]['violations']
-            hours = data_dict[method]['hours']
-            
-            # Use actual episode duration (4 hours)
-            n_hours = 4
-            bins = np.zeros((1, n_hours))
-            for h, v in zip(hours, violations):
-                hour_idx = min(int(h), n_hours - 1)
-                bins[0, hour_idx] = max(bins[0, hour_idx], v)
-            
-            im = ax.imshow(bins, aspect='auto', cmap='RdYlGn_r', 
-                          vmin=0, vmax=max(0.1, np.max(bins)),
-                          extent=[0, 4, 0, 1])
-            ax.set_xlabel('Hour')
-            ax.set_title(f'{title}\nTotal: {np.sum(violations):.3f}')
-            ax.set_yticks([])
-            ax.set_xlim(0, 4)
-            plt.colorbar(im, ax=ax, label='Violation Index')
-    
-    fig.suptitle(f'IEEE {env_name}: Voltage Violation Heatmap', fontsize=14, y=1.05)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
-
+def plot_violations(dd, env, path):
+    avail = [m for m in ALL_METHODS if m in dd and dd[m] is not None]
+    n = len(avail)
+    if n == 0: return
+    fig, axes = plt.subplots(1, n, figsize=(2.5*n, 3.5))
+    if n == 1: axes = [axes]
+    for ax, m in zip(axes, avail):
+        d = dd[m]; bins = np.zeros((1, 24))
+        for h, v in zip(d['hours'], d['violations']):
+            hi = min(int(h), 23); bins[0, hi] = max(bins[0, hi], v)
+        im = ax.imshow(bins, aspect='auto', cmap='RdYlGn_r', vmin=0, vmax=max(0.1, np.max(bins)), extent=[0,24,0,1])
+        ax.set_xlabel('Hour'); ax.set_title(f'{METHOD_NAMES.get(m,m)}\n({np.sum(d["violations"]):.3f})', fontsize=9); ax.set_yticks([])
+        plt.colorbar(im, ax=ax, label='Viol.')
+    fig.suptitle(f'IEEE {env}: Violation Heatmap (24h)', fontsize=13, y=1.05)
+    plt.tight_layout(); _save_fig(path)
 
 # ============================================================
 # ROBUSTNESS ANALYSIS
 # ============================================================
 
-def run_robustness_analysis(env_name: str, specialist_path: str, 
-                            uncertainties: list = [0, 5, 10, 15, 20, 25],
-                            n_episodes: int = 5) -> dict:
-    """
-    Test agent robustness under observation noise.
-    """
-    print(f"\nRunning robustness analysis for {env_name}...")
-    
-    results = {
-        'uncertainty': uncertainties,
-        'specialist': {'reward_mean': [], 'reward_std': [], 'violation_mean': [], 'violation_std': []},
-        'heuristic': {'reward_mean': [], 'reward_std': [], 'violation_mean': [], 'violation_std': []},
-        'model_found': False  # Track if model was found
-    }
-    
-    # Load specialist model
-    model_path_zip = specialist_path + '.zip'
-    if not os.path.exists(model_path_zip):
-        # Try alternate locations
-        alt_paths = [
-            specialist_path,  # Without .zip
-            f"./systems/{env_name}/experiment_results_fixed/specialist_{env_name}_seed42",
-            f"./experiment_results/specialist_{env_name}_seed42",
-        ]
-        
-        model_path_zip = None
-        for alt in alt_paths:
-            if os.path.exists(alt + '.zip'):
-                model_path_zip = alt + '.zip'
-                specialist_path = alt
-                print(f"  Found model at alternate location: {alt}")
-                break
-            elif os.path.exists(alt):
-                model_path_zip = alt
-                specialist_path = alt
-                print(f"  Found model at alternate location: {alt}")
-                break
-        
-        if model_path_zip is None:
-            print(f"  WARNING: Model not found. Tried paths:")
-            for alt in alt_paths:
-                print(f"    - {alt}")
-            return results
-    
-    results['model_found'] = True
-    model = PPO.load(specialist_path)
-    
-    for unc in uncertainties:
-        print(f"  Testing with {unc}% noise...")
-        
-        specialist_rewards = []
-        specialist_violations = []
-        heuristic_rewards = []
-        heuristic_violations = []
-        
-        for ep in range(n_episodes):
-            # Test specialist
-            env = IPPO_Wrapper(env_name)
-            obs, _ = env.reset(seed=42 + ep)
-            
-            ep_reward = 0
-            ep_violations = []
-            done = False
-            
-            while not done:
-                # Add noise to observation
-                if unc > 0:
-                    noise = (unc / 100) * np.random.randn(*obs.shape)
-                    noisy_obs = obs + noise
-                else:
-                    noisy_obs = obs
-                
-                action, _ = model.predict(noisy_obs, deterministic=True)
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                
-                ep_reward += reward
-                if info and 'constraint_cost' in info:
-                    ep_violations.append(info['constraint_cost'])
-            
-            specialist_rewards.append(ep_reward)
-            specialist_violations.append(np.mean(ep_violations) if ep_violations else 0)
-            env.close()
-            
-            # Test heuristic
-            raw_env = make_env(env_name)
-            env = GymnasiumCompatibilityWrapper(raw_env)
-            controller = HeuristicController(env_name)
-            
-            obs, info = env.reset(seed=42 + ep)
-            controller.reset()
-            
-            ep_reward = 0
-            ep_violations = []
-            done = False
-            
-            while not done:
-                if unc > 0:
-                    noise = (unc / 100) * np.random.randn(*obs.shape)
-                    noisy_obs = obs + noise
-                else:
-                    noisy_obs = obs
-                
-                action = controller.get_action(noisy_obs, info)
-                obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
-                
-                ep_reward += reward
-                if info and 'constraint_cost' in info:
-                    ep_violations.append(info['constraint_cost'])
-            
-            heuristic_rewards.append(ep_reward)
-            heuristic_violations.append(np.mean(ep_violations) if ep_violations else 0)
-            env.close()
-        
-        # Store results
-        results['specialist']['reward_mean'].append(np.mean(specialist_rewards))
-        results['specialist']['reward_std'].append(np.std(specialist_rewards))
-        results['specialist']['violation_mean'].append(np.mean(specialist_violations))
-        results['specialist']['violation_std'].append(np.std(specialist_violations))
-        
-        results['heuristic']['reward_mean'].append(np.mean(heuristic_rewards))
-        results['heuristic']['reward_std'].append(np.std(heuristic_rewards))
-        results['heuristic']['violation_mean'].append(np.mean(heuristic_violations))
-        results['heuristic']['violation_std'].append(np.std(heuristic_violations))
-    
-    return results
+def _run_noisy_episode(env_name, model, agent_type, wrapper_cls, noise_pct, config, seed):
+    """Run one episode with observation noise. Returns (total_reward, mean_violation)."""
+    if agent_type in ('specialist', 'mappo'):
+        env = wrapper_cls(env_name)
+        obs, _ = env.reset(seed=seed)
+        agents = env.agents
+        n_agents = len(agents)
+        ep_reward = 0
+        violations = []
+        for step in range(EPISODE_STEPS):
+            fr, fi, done = 0, {}, False
+            for ai in range(n_agents):
+                noisy = obs + (noise_pct / 100.0) * np.random.randn(*obs.shape) if noise_pct > 0 else obs
+                action, _ = model.predict(noisy, deterministic=True)
+                obs, r, te, tr, info = env.step(action)
+                if ai == n_agents - 1:
+                    fr, fi, done = r, info, te or tr
+            ep_reward += fr
+            if isinstance(fi, dict):
+                violations.append(fi.get('constraint_cost', abs(fi.get('vol_reward', 0.0))))
+            if done: break
+        env.close()
+    elif agent_type == 'heuristic':
+        raw = make_env(env_name)
+        env = GymnasiumCompatibilityWrapper(raw)
+        obs, info = env.reset(seed=seed)
+        ctrl = HeuristicController(env_name); ctrl.reset()
+        ep_reward = 0; violations = []
+        for step in range(EPISODE_STEPS):
+            noisy = obs + (noise_pct / 100.0) * np.random.randn(*obs.shape) if noise_pct > 0 else obs
+            action = ctrl.get_action(noisy, info)
+            obs, reward, te, tr, info = env.step(action)
+            ep_reward += reward
+            if isinstance(info, dict):
+                violations.append(info.get('constraint_cost', abs(info.get('vol_reward', 0.0))))
+            if te or tr: break
+        env.close()
+    elif agent_type == 'monolithic':
+        raw = make_env(env_name)
+        env = GymnasiumCompatibilityWrapper(raw)
+        obs, info = env.reset(seed=seed)
+        ep_reward = 0; violations = []
+        for step in range(EPISODE_STEPS):
+            noisy = obs + (noise_pct / 100.0) * np.random.randn(*obs.shape) if noise_pct > 0 else obs
+            action, _ = model.predict(noisy, deterministic=True)
+            obs, reward, te, tr, info = env.step(action)
+            ep_reward += reward
+            if isinstance(info, dict):
+                violations.append(info.get('constraint_cost', abs(info.get('vol_reward', 0.0))))
+            if te or tr: break
+        env.close()
+    else:
+        return 0.0, 0.0
+
+    return ep_reward, np.mean(violations) if violations else 0.0
 
 
-def plot_robustness_analysis(results: dict, env_name: str, save_path: str):
+def run_robustness_analysis(env_name, results_dir, seed=42,
+                            noise_levels=None, n_episodes=5):
     """
-    Plot robustness analysis results.
+    Test all available methods under increasing observation noise.
     """
-    # Check if we have data to plot
-    if not results.get('model_found', False) or len(results['specialist']['reward_mean']) == 0:
-        print(f"  Skipping robustness plot for {env_name} - no data available")
+    if noise_levels is None:
+        noise_levels = [0, 5, 10, 15, 20, 25]
+
+    config = DEVICE_CONFIG[env_name]
+    results = {}
+
+    # Resolve to absolute path
+    results_dir = os.path.abspath(results_dir)
+
+    def me(p):
+        exists = os.path.exists(p + '.zip') or os.path.exists(p)
+        print(f"    {os.path.basename(p)}: {'FOUND' if exists else 'NOT FOUND'}")
+        return exists
+
+    # Build method -> (model, agent_type, wrapper_cls) mapping
+    methods_to_test = {}
+
+    sp = f"{results_dir}/specialist_{env_name}_seed{seed}"
+    if me(sp):
+        methods_to_test['specialist'] = (PPO.load(sp), 'specialist', IPPO_Wrapper)
+
+    mo = f"{results_dir}/monolithic_{env_name}_seed{seed}"
+    if me(mo):
+        methods_to_test['monolithic'] = (PPO.load(mo), 'monolithic', None)
+
+    ma = f"{results_dir}/mappo_{env_name}_seed{seed}"
+    if me(ma):
+        if MAPPO_Wrapper:
+            methods_to_test['mappo'] = (PPO.load(ma), 'mappo', MAPPO_Wrapper)
+        else:
+            print(f"      -> SKIPPED (MAPPO_Wrapper not imported)")
+
+    if HeuristicController:
+        methods_to_test['heuristic'] = (None, 'heuristic', None)
+
+    # Note: MADDPG, OpenDSS Auto, Model-Based OPF are excluded from
+    # robustness analysis because they don't take raw observations as
+    # input in the same way (MADDPG uses its own obs pipeline, model-based
+    # methods read directly from the simulator)
+
+    print(f"\n  Robustness analysis for {env_name}")
+    print(f"  Methods: {list(methods_to_test.keys())}")
+    print(f"  Noise levels: {noise_levels}%")
+    print(f"  Episodes per level: {n_episodes}")
+
+    for method, (model, atype, wcls) in methods_to_test.items():
+        results[method] = {
+            'reward_mean': [], 'reward_std': [],
+            'violation_mean': [], 'violation_std': []
+        }
+
+        for noise in noise_levels:
+            rewards, viols = [], []
+            for ep in range(n_episodes):
+                r, v = _run_noisy_episode(
+                    env_name, model, atype, wcls, noise, config, seed=seed + ep)
+                rewards.append(r)
+                viols.append(v)
+
+            results[method]['reward_mean'].append(float(np.mean(rewards)))
+            results[method]['reward_std'].append(float(np.std(rewards)))
+            results[method]['violation_mean'].append(float(np.mean(viols)))
+            results[method]['violation_std'].append(float(np.std(viols)))
+
+            print(f"    {method} @ {noise}% noise: reward={np.mean(rewards):.2f}±{np.std(rewards):.2f}")
+
+    return {'noise_levels': noise_levels, 'methods': results}
+
+
+def plot_robustness(rob_results, env_name, save_path):
+    """Plot reward degradation and violation increase under noise."""
+    noise_levels = rob_results['noise_levels']
+    methods = rob_results['methods']
+
+    if not methods:
+        print(f"  No robustness data for {env_name}")
         return
-    
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    uncertainties = results['uncertainty']
-    
-    # Reward plot
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Reward degradation
     ax1 = axes[0]
-    
-    specialist_reward = results['specialist']['reward_mean']
-    specialist_std = results['specialist']['reward_std']
-    ax1.plot(uncertainties, specialist_reward, 'g-o', linewidth=2, markersize=8, 
-            label='Specialist Ensemble')
-    ax1.fill_between(uncertainties, 
-                     np.array(specialist_reward) - np.array(specialist_std),
-                     np.array(specialist_reward) + np.array(specialist_std),
-                     color='green', alpha=0.2)
-    
-    heuristic_reward = results['heuristic']['reward_mean']
-    heuristic_std = results['heuristic']['reward_std']
-    ax1.plot(uncertainties, heuristic_reward, 'r--s', linewidth=2, markersize=8,
-            label='Heuristic')
-    ax1.fill_between(uncertainties,
-                     np.array(heuristic_reward) - np.array(heuristic_std),
-                     np.array(heuristic_reward) + np.array(heuristic_std),
-                     color='red', alpha=0.2)
-    
+    for method, data in methods.items():
+        c, ls, lw, lb = _sty(method)
+        rm = np.array(data['reward_mean'])
+        rs = np.array(data['reward_std'])
+        # Normalize to % of baseline (0% noise)
+        if rm[0] != 0:
+            normalized = (rm / rm[0]) * 100
+        else:
+            normalized = rm
+        ax1.plot(noise_levels, normalized, color=c, linestyle=ls, linewidth=lw,
+                 marker='o', markersize=6, label=lb)
+        ax1.fill_between(noise_levels,
+                         ((rm - rs) / abs(rm[0]) * 100) if rm[0] != 0 else rm - rs,
+                         ((rm + rs) / abs(rm[0]) * 100) if rm[0] != 0 else rm + rs,
+                         color=c, alpha=0.15)
+
     ax1.set_xlabel('Observation Noise (%)')
-    ax1.set_ylabel('Episode Reward')
-    ax1.set_title('Reward Degradation Under Uncertainty')
-    ax1.legend()
+    ax1.set_ylabel('Reward (% of baseline)')
+    ax1.set_title('Reward Degradation Under Noise')
+    ax1.legend(loc='lower left', fontsize=9)
     ax1.grid(True, alpha=0.3)
-    
-    # Violation plot
+    ax1.axhline(100, color='gray', ls=':', lw=0.8)
+
+    # Violation increase
     ax2 = axes[1]
-    
-    specialist_viol = results['specialist']['violation_mean']
-    specialist_viol_std = results['specialist']['violation_std']
-    ax2.plot(uncertainties, specialist_viol, 'g-o', linewidth=2, markersize=8,
-            label='Specialist Ensemble')
-    ax2.fill_between(uncertainties,
-                     np.array(specialist_viol) - np.array(specialist_viol_std),
-                     np.array(specialist_viol) + np.array(specialist_viol_std),
-                     color='green', alpha=0.2)
-    
-    heuristic_viol = results['heuristic']['violation_mean']
-    heuristic_viol_std = results['heuristic']['violation_std']
-    ax2.plot(uncertainties, heuristic_viol, 'r--s', linewidth=2, markersize=8,
-            label='Heuristic')
-    ax2.fill_between(uncertainties,
-                     np.array(heuristic_viol) - np.array(heuristic_viol_std),
-                     np.array(heuristic_viol) + np.array(heuristic_viol_std),
-                     color='red', alpha=0.2)
-    
+    for method, data in methods.items():
+        c, ls, lw, lb = _sty(method)
+        vm = np.array(data['violation_mean'])
+        vs = np.array(data['violation_std'])
+        ax2.plot(noise_levels, vm, color=c, linestyle=ls, linewidth=lw,
+                 marker='s', markersize=6, label=lb)
+        ax2.fill_between(noise_levels, vm - vs, vm + vs, color=c, alpha=0.15)
+
     ax2.set_xlabel('Observation Noise (%)')
-    ax2.set_ylabel('Voltage Violation Index')
-    ax2.set_title('Violation Increase Under Uncertainty')
-    ax2.legend()
+    ax2.set_ylabel('Mean Voltage Violation')
+    ax2.set_title('Violation Increase Under Noise')
+    ax2.legend(loc='upper left', fontsize=9)
     ax2.grid(True, alpha=0.3)
-    
-    fig.suptitle(f'IEEE {env_name}: Robustness Analysis', fontsize=14, y=1.02)
-    
+
+    fig.suptitle(f'IEEE {env_name}: Robustness to Observation Noise', fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
-
-
-# ============================================================
-# TRAINING CURVE PLOTS
-# ============================================================
-
-def plot_training_curves_from_files(env_name: str, results_dir: str, 
-                                    seeds: list, save_path: str):
-    """
-    Generate training curve plots from saved training data files.
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    colors = {'specialist': '#2ecc71', 'monolithic': '#3498db'}
-    
-    for method in ['specialist', 'monolithic']:
-        all_rewards = []
-        max_len = 0
-        
-        for seed in seeds:
-            data_path = f"{results_dir}/{method}_{env_name}_seed{seed}_training_data.json"
-            if os.path.exists(data_path):
-                with open(data_path, 'r') as f:
-                    data = json.load(f)
-                rewards = data.get('rewards', [])
-                if len(rewards) > 0:
-                    all_rewards.append(rewards)
-                    max_len = max(max_len, len(rewards))
-        
-        if len(all_rewards) == 0:
-            continue
-        
-        # Pad to same length
-        padded = []
-        for r in all_rewards:
-            if len(r) < max_len:
-                r = r + [r[-1]] * (max_len - len(r))
-            padded.append(r[:max_len])
-        
-        rewards_array = np.array(padded)
-        mean_rewards = np.mean(rewards_array, axis=0)
-        std_rewards = np.std(rewards_array, axis=0)
-        
-        timesteps = np.arange(len(mean_rewards)) * 500  # Assuming 500-step logging
-        
-        ax.plot(timesteps, mean_rewards, color=colors[method],
-               label=f"{method.capitalize()} (n={len(all_rewards)})", linewidth=2)
-        ax.fill_between(timesteps,
-                       mean_rewards - std_rewards,
-                       mean_rewards + std_rewards,
-                       color=colors[method], alpha=0.2)
-    
-    ax.set_xlabel('Training Timesteps')
-    ax.set_ylabel('Average Episode Reward')
-    ax.set_title(f'IEEE {env_name}: Training Convergence')
-    ax.legend(loc='lower right')
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved: {save_path}")
+    _save_fig(save_path)
 
 
 # ============================================================
@@ -943,146 +773,52 @@ def plot_training_curves_from_files(env_name: str, results_dir: str,
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Agent Behavior Analysis')
-    parser.add_argument('--env_name', type=str, default='13Bus',
-                       choices=['13Bus', '34Bus', '123Bus', 'all'])
-    parser.add_argument('--results_dir', type=str, default='./experiment_results',
-                       help='Directory containing trained models')
+    parser = argparse.ArgumentParser(description='Agent Behavior Analysis (v2)')
+    parser.add_argument('--env_name', type=str, default='13Bus', choices=['13Bus','34Bus','123Bus','all'])
+    parser.add_argument('--results_dir', type=str, default='./experiment_results')
     parser.add_argument('--output_dir', type=str, default='./analysis_plots')
-    parser.add_argument('--robustness', action='store_true',
-                       help='Run robustness analysis')
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--seeds', type=str, default='42,123,456,789,1011',
-                       help='Comma-separated list of seeds for training curves')
-    
+    parser.add_argument('--robustness', action='store_true', help='Run robustness analysis under observation noise')
+    parser.add_argument('--noise_levels', type=str, default='0,5,10,15,20,25',
+                        help='Comma-separated noise percentages')
+    parser.add_argument('--rob_episodes', type=int, default=5,
+                        help='Episodes per noise level for robustness')
     args = parser.parse_args()
-    
-    # Parse seeds
-    seeds = [int(s) for s in args.seeds.split(',')]
-    
-    # Get absolute paths
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    results_dir = os.path.join(script_dir, args.results_dir.lstrip('./'))
-    output_dir = os.path.join(script_dir, args.output_dir.lstrip('./'))
-    os.makedirs(output_dir, exist_ok=True)
-    
-    environments = ['13Bus', '34Bus', '123Bus'] if args.env_name == 'all' else [args.env_name]
-    
+    args.output_dir = os.path.abspath(args.output_dir)
+    args.results_dir = os.path.abspath(args.results_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
+    envs = ['13Bus','34Bus','123Bus'] if args.env_name == 'all' else [args.env_name]
+    noise_levels = [int(x) for x in args.noise_levels.split(',')]
+
     print(f"\n{'='*60}")
-    print(f"Agent Behavior Analysis")
-    print(f"Environments: {environments}")
-    print(f"Results Dir: {results_dir}")
-    print(f"Output Dir: {output_dir}")
-    print(f"{'='*60}")
-    
-    for env_name in environments:
-        print(f"\n{'#'*40}")
-        print(f"# Processing {env_name}")
-        print(f"{'#'*40}")
-        
-        # Paths to models - try multiple locations
-        def find_model_path(model_type: str, env: str, seed: int, base_dirs: list) -> str:
-            """Search for model in multiple possible directories."""
-            filename = f"{model_type}_{env}_seed{seed}"
-            for base in base_dirs:
-                for path in [
-                    f"{base}/{filename}",
-                    f"{base}/{env}/{filename}",
-                    f"./systems/{env}/{base.split('/')[-1]}/{filename}",
-                ]:
-                    if os.path.exists(path + '.zip') or os.path.exists(path):
-                        return path
-            return f"{base_dirs[0]}/{filename}"  # Default fallback
-        
-        search_dirs = [results_dir, './experiment_results_fixed', './experiment_results']
-        specialist_path = find_model_path('specialist', env_name, args.seed, search_dirs)
-        monolithic_path = find_model_path('monolithic', env_name, args.seed, search_dirs)
-        
-        print(f"  Specialist path: {specialist_path}")
-        print(f"  Monolithic path: {monolithic_path}")
-        
-        # Collect comparative data
-        data = collect_comparative_data(env_name, specialist_path, monolithic_path, args.seed)
-        
-        if len(data) == 0:
-            print(f"  No data collected for {env_name}, skipping plots")
-            continue
-        
-        # Generate plots
-        print(f"\nGenerating plots for {env_name}...")
-        
-        # 1. Regulator comparison
-        plot_regulator_comparison(
-            data, env_name,
-            save_path=f"{output_dir}/regulator_comparison_{env_name}.png"
-        )
-        
-        # 2. Capacitor comparison
-        plot_capacitor_comparison(
-            data, env_name,
-            save_path=f"{output_dir}/capacitor_comparison_{env_name}.png"
-        )
-        
-        # 3. Battery comparison
-        plot_battery_comparison(
-            data, env_name,
-            save_path=f"{output_dir}/battery_comparison_{env_name}.png"
-        )
-        
-        # 4. Voltage profile comparison
-        plot_voltage_profile_comparison(
-            data, env_name,
-            save_path=f"{output_dir}/voltage_profile_{env_name}.png"
-        )
-        
-        # 5. Cumulative rewards
-        plot_cumulative_rewards(
-            data, env_name,
-            save_path=f"{output_dir}/cumulative_rewards_{env_name}.png"
-        )
-        
-        # 6. Violation heatmap
-        plot_violation_heatmap(
-            data, env_name,
-            save_path=f"{output_dir}/violation_heatmap_{env_name}.png"
-        )
-        
-        # 7. Training curves (from files)
-        plot_training_curves_from_files(
-            env_name, results_dir, seeds,
-            save_path=f"{output_dir}/training_curve_{env_name}.png"
-        )
-        
-        # 8. Robustness analysis (optional)
-        if args.robustness:
-            robustness_results = run_robustness_analysis(
-                env_name, specialist_path,
-                uncertainties=[0, 5, 10, 15, 20, 25],
-                n_episodes=5
-            )
-            
-            # Only plot and save if we have data
-            if robustness_results.get('model_found', False):
-                plot_robustness_analysis(
-                    robustness_results, env_name,
-                    save_path=f"{output_dir}/robustness_{env_name}.png"
-                )
-                
-                # Save robustness data
-                with open(f"{output_dir}/robustness_data_{env_name}.json", 'w') as f:
-                    json.dump(robustness_results, f, indent=2, cls=NumpyEncoder)
-            else:
-                print(f"  Skipping robustness save for {env_name} - model not found")
-        
-        # Save collected data
-        with open(f"{output_dir}/behavior_data_{env_name}.json", 'w') as f:
-            json.dump(data, f, indent=2, cls=NumpyEncoder)
-    
-    print(f"\n{'='*60}")
-    print(f"Analysis complete!")
-    print(f"Plots saved to: {output_dir}")
+    print(f"Agent Behavior Analysis (v2) - 7 Methods, 24h Episodes")
     print(f"{'='*60}")
 
+    for env in envs:
+        print(f"\n# {env}")
+        dd = collect_all(env, args.results_dir, args.seed)
+        if not dd: print(f"  No data"); continue
+        od = args.output_dir
+        os.makedirs(od, exist_ok=True)
+        plot_regulators(dd, env, f"{od}/regulator_{env}.png")
+        plot_capacitors(dd, env, f"{od}/capacitor_{env}.png")
+        plot_batteries(dd, env, f"{od}/battery_{env}.png")
+        plot_voltage(dd, env, f"{od}/voltage_profile_{env}.png")
+        plot_cumulative(dd, env, f"{od}/cumulative_reward_{env}.png")
+        plot_violations(dd, env, f"{od}/violation_heatmap_{env}.png")
+        with open(f"{od}/behavior_data_{env}.json", 'w') as f:
+            json.dump(dd, f, indent=2, cls=NumpyEncoder)
+
+        # Robustness analysis
+        if args.robustness:
+            rob = run_robustness_analysis(
+                env, args.results_dir, args.seed,
+                noise_levels=noise_levels, n_episodes=args.rob_episodes)
+            plot_robustness(rob, env, f"{od}/robustness_{env}.png")
+            with open(f"{od}/robustness_data_{env}.json", 'w') as f:
+                json.dump(rob, f, indent=2, cls=NumpyEncoder)
+
+    print(f"\nDone! Plots in {args.output_dir}")
 
 if __name__ == "__main__":
     main()

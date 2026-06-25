@@ -1,0 +1,44 @@
+{
+  "oracle": {
+    "solver": "LinDist3Flow MILP oracle (perfect-info, HiGHS, T=144)",
+    "reward_mean": -14.085985403348014,
+    "reward_std": 0.46582108141896467,
+    "reward_all": [
+      -14.550539353892109,
+      -14.19130235642301,
+      -13.471033148411781,
+      -13.61920924610018,
+      -14.597842911912975
+    ],
+    "violation_mean": 0.0077223820985714816,
+    "loss_mean": 0.06783265121592437,
+    "pct_episodes_with_violation": 100.0,
+    "cap_switches_mean": 0.0,
+    "reg_switches_mean": 105.79999999823676,
+    "solve_time_mean": 0.9842257499694824,
+    "v_gap_mean": 0.00358706630992852,
+    "v_gap_max": 0.04704655016230852,
+    "n_profiles": 5
+  },
+  "mpc": {
+    "solver": "LinDist3Flow MPC (persistence W=6, HiGHS)",
+    "reward_mean": -14.3153859030942,
+    "reward_std": 0.43457183357286033,
+    "reward_all": [
+      -14.773920002852158,
+      -14.34054159400181,
+      -13.756543519166012,
+      -13.895661261044571,
+      -14.810263138406434
+    ],
+    "violation_mean": 0.012365865447015673,
+    "loss_mean": 0.06705495416622265,
+    "pct_episodes_with_violation": 100.0,
+    "cap_switches_mean": 0.0,
+    "reg_switches_mean": 94.99999999841668,
+    "solve_time_mean": 46.45617799758911,
+    "v_gap_mean": null,
+    "v_gap_max": null,
+    "n_profiles": 5
+  }
+}
